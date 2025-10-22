@@ -510,3 +510,13 @@ if metadata_rows:
     metadata_df.to_parquet(output_dir / "metadata.parquet", index=False)
 
 print(f"\n📁 Готово! Данные сохранены в каталоге {output_dir.resolve()}")
+
+
+
+import pandas as pd
+from pathlib import Path
+
+parquet_dir = Path("cbr_parquet")
+all_frames = [pd.read_parquet(p) for p in parquet_dir.glob("*.parquet") if p.name != "metadata.parquet"]
+combined = pd.concat(all_frames, ignore_index=True)
+combined.to_parquet("cbr_parquet/all_data.parquet", index=False)
