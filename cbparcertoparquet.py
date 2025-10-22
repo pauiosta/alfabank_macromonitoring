@@ -618,3 +618,109 @@ def load_data_to_hadoop():
 
 if __name__ == "__main__":
     load_data_to_hadoop()
+
+
+import pandas as pd
+import pyodbc
+from datetime import datetime
+from pathlib import Path
+
+PARQUET_FILE = Path("cbr_parquet/all_data.parquet")
+TARGET_TABLE = "u_m26pu.cbr_all_data"   # поменяйте на свою БД.таблицу
+DSN_NAME = "impala51"                   # имя ODBC-DSN для Impala
+BATCH_SIZE = 10_000                     # размер пачки для executemany
+
+# перечень колонок и их типы в Impala
+column_types = {
+    "publication_id": "STRING",
+    "publication_name": "STRING",
+    "dataset_id": "STRING",
+    "dataset_name": "STRING",
+    "measure_id_requested": "STRING",
+    "obs_val": "DOUBLE",                # числовой тип для значения показателя
+    "time": "STRING",
+    "indicator_name": "STRING",
+    "element_name": "STRING",
+    "measure_name": "STRING",
+    "unit_name": "STRING",
+}
+required_columns = list(column_types)
+
+
+def load_data_to_hadoop():
+    try:
+        print(f"[{datetime.now()}] Чтение Parquet: {PARQUET_FILE}")
+        df = pd.read_parquet(PARQUET_FILE)
+
+        missing = [col for col in required_columns if col not in df.columns]
+        if missing:
+            raise ValueError(f"Отсутствуют колонки: {missing}")
+
+        # obs_val → numeric (несчитываемые значения станут NaN)
+        df["obs_val"] = pd.to_numeric(df["obs_val"], errors="coerce")
+
+        # строковые поля → строки без NaN
+        string_cols = [col for col, typ in column_types.items() if typ == "STRING"]
+        df[string_cols] = df[string_cols].apply(lambda s: s.fillna("").astype(str))
+
+        print(f"[{datetime.now()}] Подключение к Impala (DSN={DSN_NAME})")
+        conn = pyodbc.connect(
+            f"DSN={DSN_NAME};",
+            autocommit=True,
+            ansi=True,
+            timeout=0,
+        )
+        cursor = conn.cursor()
+
+        column_defs = ",\n    ".join(
+            f"`{col}` {column_types[col]}" for col in required_columns
+        )
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS {TARGET_TABLE} (
+                {column_defs}
+            )
+            STORED AS PARQUET
+            TBLPROPERTIES ('transactional'='false', 'parquet.compression'='SNAPPY')
+        """)
+        print(f"[{datetime.now()}] Таблица готова")
+
+        total_rows = len(df)
+        inserted_rows = 0
+        print(f"[{datetime.now()}] Старт загрузки: {total_rows} строк")
+
+        for start in range(0, total_rows, BATCH_SIZE):
+            end = min(start + BATCH_SIZE, total_rows)
+            batch = df.iloc[start:end][required_columns]
+
+            placeholders = ", ".join(["?"] * len(required_columns))
+            data = [tuple(row) for row in batch.itertuples(index=False, name=None)]
+
+            try:
+                cursor.fast_executemany = True
+                cursor.executemany(
+                    f"INSERT INTO {TARGET_TABLE} VALUES ({placeholders})",
+                    data,
+                )
+                inserted_rows += len(data)
+                print(f"[{datetime.now()}] Загружено {inserted_rows}/{total_rows}")
+            except pyodbc.Error as e:
+                print(f"[{datetime.now()}] Ошибка пакета {start}-{end}: {e}")
+                with open("error_batch.txt", "a", encoding="utf-8") as err:
+                    err.write(f"{datetime.now()} — пакет {start}-{end}: {e}\n")
+                    batch.to_csv(err, sep="\t", index=False)
+                continue
+
+        print(f"[{datetime.now()}] Успешно загружено {inserted_rows} строк")
+
+    except Exception as e:
+        print(f"[{datetime.now()}] Критическая ошибка: {e}")
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
+        print(f"[{datetime.now()}] Соединение закрыто")
+
+
+if __name__ == "__main__":
+    load_data_to_hadoop()
