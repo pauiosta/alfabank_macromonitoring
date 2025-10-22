@@ -728,3 +728,10 @@ if __name__ == "__main__":
 
 df["obs_val"] = pd.to_numeric(df["obs_val"], errors="coerce")
 df["obs_val"] = df["obs_val"].where(pd.notnull(df["obs_val"]), None)
+
+
+df["obs_val"] = (
+    pd.to_numeric(df["obs_val"], errors="coerce")
+      .fillna(-1.0)        # именно здесь убираем NaN
+      .astype(float)
+)
