@@ -724,3 +724,7 @@ def load_data_to_hadoop():
 
 if __name__ == "__main__":
     load_data_to_hadoop()
+
+
+df["obs_val"] = pd.to_numeric(df["obs_val"], errors="coerce")
+df["obs_val"] = df["obs_val"].where(pd.notnull(df["obs_val"]), None)
