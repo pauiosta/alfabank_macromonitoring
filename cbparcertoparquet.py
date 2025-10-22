@@ -520,3 +520,101 @@ parquet_dir = Path("cbr_parquet")
 all_frames = [pd.read_parquet(p) for p in parquet_dir.glob("*.parquet") if p.name != "metadata.parquet"]
 combined = pd.concat(all_frames, ignore_index=True)
 combined.to_parquet("cbr_parquet/all_data.parquet", index=False)
+
+
+
+import pandas as pd
+import pyodbc
+from datetime import datetime
+from pathlib import Path
+
+PARQUET_FILE = Path("cbr_parquet/all_data.parquet")
+TARGET_TABLE = "u_m26pu.cbr_all_data"
+DSN_NAME = "impala51"          # замените на свой DSN
+BATCH_SIZE = 10_000            # можно менять под объём
+
+# если хотим ограничиться определёнными колонками — перечислите их здесь
+required_columns = [
+    "publication_id",
+    "publication_name",
+    "dataset_id",
+    "dataset_name",
+    "measure_id_requested",
+    "obs_val",
+    "time",
+    "indicator_name",
+    "element_name",
+    "measure_name",
+    "unit_name",
+]
+
+def load_data_to_hadoop():
+    try:
+        print(f"[{datetime.now()}] Начало чтения Parquet: {PARQUET_FILE}")
+        df = pd.read_parquet(PARQUET_FILE)
+
+        missing = [col for col in required_columns if col not in df.columns]
+        if missing:
+            raise ValueError(f"Отсутствуют колонки: {missing}")
+
+        df = df.fillna("")  # при необходимости замените на свои правила заполнения
+
+        print(f"[{datetime.now()}] Подключение к Impala (DSN={DSN_NAME})")
+        conn = pyodbc.connect(
+            f"DSN={DSN_NAME};",
+            autocommit=True,
+            ansi=True,
+            timeout=0,
+        )
+        cursor = conn.cursor()
+
+        # создаём таблицу (все поля как STRING — подстройте типы при необходимости)
+        column_defs = ",\n    ".join(f"`{col}` STRING" for col in required_columns)
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS {TARGET_TABLE} (
+                {column_defs}
+            )
+            STORED AS PARQUET
+            TBLPROPERTIES ('transactional'='false', 'parquet.compression'='SNAPPY')
+        """)
+        print(f"[{datetime.now()}] Таблица проверена/создана")
+
+        total_rows = len(df)
+        inserted_rows = 0
+        print(f"[{datetime.now()}] Старт загрузки: {total_rows} строк...")
+
+        for start in range(0, total_rows, BATCH_SIZE):
+            end = min(start + BATCH_SIZE, total_rows)
+            batch = df.loc[start:end - 1, required_columns]
+
+            placeholders = ", ".join(["?"] * len(required_columns))
+            data = [tuple(row) for row in batch.itertuples(index=False, name=None)]
+
+            try:
+                cursor.fast_executemany = True
+                cursor.executemany(
+                    f"INSERT INTO {TARGET_TABLE} VALUES ({placeholders})",
+                    data,
+                )
+                inserted_rows += len(data)
+                print(f"[{datetime.now()}] Загружено: {inserted_rows}/{total_rows}")
+            except pyodbc.Error as e:
+                print(f"[{datetime.now()}] Ошибка пакета {start}-{end}: {e}")
+                with open("error_batch.txt", "a", encoding="utf-8") as err:
+                    err.write(f"{datetime.now()} — пакет {start}-{end}: {e}\n")
+                    batch.to_csv(err, sep="\t", index=False)
+                continue
+
+        print(f"[{datetime.now()}] Успешно загружено {inserted_rows} строк")
+
+    except Exception as e:
+        print(f"[{datetime.now()}] Критическая ошибка: {e}")
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
+        print(f"[{datetime.now()}] Соединение закрыто")
+
+if __name__ == "__main__":
+    load_data_to_hadoop()
