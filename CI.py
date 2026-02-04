@@ -83,3 +83,35 @@ for c in flag_cols:
     summary = summary.merge(m, on=group_cols, how="left")
 
 summary
+
+
+group_cols = ["TEST_NAME", "TEST_GROUP_NAME"]
+flag_cols = ["FPD_7PLUS_FLG", "D2P3_FLG", "D4P6_FLG", "D4P9_FLG", "D4P12_FLG"]
+
+def agg_flag(s, alpha=0.05):
+    base = int(s.notna().sum())
+    events = int(s.fillna(0).sum())
+    rate = events / base if base else np.nan
+    lo, hi = wilson_ci(events, base, alpha=alpha)
+    return pd.Series({"base": base, "events": events, "rate": rate, "ci_low": lo, "ci_high": hi})
+
+summary = (
+    df.groupby(group_cols, dropna=False)
+      .agg(
+          n_obs=("APPLICATION_RK", "count"),
+          min_utilization_dttm=("UTILIZATION_DTTM", "min"),
+          max_utilization_dttm=("UTILIZATION_DTTM", "max"),
+      )
+)
+
+# считаем метрики и “расплющиваем” в wide-формат
+metrics = []
+for c in flag_cols:
+    m = df.groupby(group_cols, dropna=False)[c].apply(agg_flag)
+    # m имеет MultiIndex (group_cols + metric_name). unstack превращает metric_name в колонки
+    m = m.unstack()  # columns: base/events/rate/ci_low/ci_high
+    m = m.add_prefix(f"{c}__")  # FPD_7PLUS_FLG__base и т.д.
+    metrics.append(m)
+
+summary = summary.join(metrics, how="left").reset_index()
+summary
