@@ -115,3 +115,7 @@ for c in flag_cols:
 
 summary = summary.join(metrics, how="left").reset_index()
 summary
+
+
+summary["min_utilization_dttm"] = pd.to_datetime(summary["min_utilization_dttm"]).dt.date
+summary["max_utilization_dttm"] = pd.to_datetime(summary["max_utilization_dttm"]).dt.date
