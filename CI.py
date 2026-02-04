@@ -119,3 +119,5 @@ summary
 
 summary["min_utilization_dttm"] = pd.to_datetime(summary["min_utilization_dttm"]).dt.date
 summary["max_utilization_dttm"] = pd.to_datetime(summary["max_utilization_dttm"]).dt.date
+
+summary.to_excel("xsell_summary.xlsx", index=False)
