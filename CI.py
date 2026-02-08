@@ -223,3 +223,213 @@ def metric_ci_for_group(
 # 3) разрез по term + rate
 # res = metric_ci_for_group(df, "RBP_CONT_MIDTERM", "CHALLENGER_AMT", "D4P6_FLG",
 #                           cuts=["TERM", "MONTHLY_CREDIT_RATE"])
+
+
+import numpy as np
+import pandas as pd
+from math import sqrt
+from scipy.stats import norm, ttest_ind
+
+# ---------------------------
+# Helpers: Wilson CI for proportion
+# ---------------------------
+def wilson_ci(k: int, n: int, alpha: float = 0.05):
+    if n == 0:
+        return (np.nan, np.nan)
+    z = norm.ppf(1 - alpha/2)
+    phat = k / n
+    denom = 1 + (z**2)/n
+    center = (phat + (z**2)/(2*n)) / denom
+    half = (z * sqrt((phat*(1-phat) + (z**2)/(4*n))/n)) / denom
+    lo = max(0.0, center - half)
+    hi = min(1.0, center + half)
+    return lo, hi
+
+# ---------------------------
+# MDE for proportions (approx, two-sided)
+# ---------------------------
+def mde_prop(p: float, n1: int, n2: int, alpha: float = 0.05, power: float = 0.8):
+    if n1 == 0 or n2 == 0 or np.isnan(p):
+        return np.nan
+    z_alpha = norm.ppf(1 - alpha/2)
+    z_beta  = norm.ppf(power)
+    se = sqrt(p*(1-p)*(1/n1 + 1/n2))
+    return (z_alpha + z_beta) * se  # absolute MDE in probability units
+
+# ---------------------------
+# MDE for means (approx, pooled SD)
+# ---------------------------
+def mde_mean(sd_pooled: float, n1: int, n2: int, alpha: float = 0.05, power: float = 0.8):
+    if n1 == 0 or n2 == 0 or np.isnan(sd_pooled):
+        return np.nan
+    z_alpha = norm.ppf(1 - alpha/2)
+    z_beta  = norm.ppf(power)
+    se = sd_pooled * sqrt(1/n1 + 1/n2)
+    return (z_alpha + z_beta) * se  # absolute MDE in units of the metric
+
+# ---------------------------
+# Main compare
+# metrics_spec example:
+# [
+#   {"name":"conv_offer_to_utilization_2m", "type":"prop"},  # 0/1 or boolean or already rate by row
+#   {"name":"prod_disbursement_amt", "type":"mean"},
+#   ...
+# ]
+# ---------------------------
+def compare_two_groups(
+    df: pd.DataFrame,
+    test_name: str,
+    group_a: str,
+    group_b: str,
+    metrics_spec: list,
+    cuts: list | None = None,
+    alpha: float = 0.05,
+    power: float = 0.8
+) -> pd.DataFrame:
+
+    cuts = cuts or []
+    base_cols = ["TEST_NAME", "TEST_GROUP_NAME"] + cuts
+
+    d = df[df["TEST_NAME"] == test_name].copy()
+    d = d[d["TEST_GROUP_NAME"].isin([group_a, group_b])].copy()
+
+    out_rows = []
+
+    # будем считать отдельно по каждому разрезу (если cuts пустой — будет один блок)
+    if cuts:
+        keys = d[cuts].drop_duplicates()
+        keys_iter = keys.to_dict("records")
+    else:
+        keys_iter = [dict()]
+
+    for key in keys_iter:
+        dd = d.copy()
+        for c, v in key.items():
+            dd = dd[dd[c] == v]
+
+        for m in metrics_spec:
+            col = m["name"]
+            mtype = m.get("type", "mean")  # mean/prop
+
+            a = dd[dd["TEST_GROUP_NAME"] == group_a][col]
+            b = dd[dd["TEST_GROUP_NAME"] == group_b][col]
+
+            # drop NaN
+            a_non = a.dropna()
+            b_non = b.dropna()
+
+            nA = len(a_non)
+            nB = len(b_non)
+
+            # значения по группам
+            if mtype == "prop":
+                # считаем events как сумму 1-иц
+                kA = int(a_non.fillna(0).sum())
+                kB = int(b_non.fillna(0).sum())
+                pA = kA / nA if nA > 0 else np.nan
+                pB = kB / nB if nB > 0 else np.nan
+
+                # значимость (z-test разности долей, pooled)
+                if nA > 0 and nB > 0:
+                    p_pool = (kA + kB) / (nA + nB) if (nA + nB) > 0 else np.nan
+                    se = sqrt(p_pool*(1-p_pool)*(1/nA + 1/nB)) if p_pool == p_pool else np.nan
+                    z = (pB - pA)/se if se and se > 0 else np.nan
+                    pval = 2*(1 - norm.cdf(abs(z))) if z == z else np.nan
+                else:
+                    pval = np.nan
+
+                uplift = ((pB - pA) / pA) if (pA and pA != 0 and pA == pA and pB == pB) else np.nan
+                mde = mde_prop(pA, nA, nB, alpha=alpha, power=power)  # абсолютный MDE в долях
+
+                valA, valB = pA, pB
+
+            else:
+                # mean metric
+                meanA = float(a_non.mean()) if nA > 0 else np.nan
+                meanB = float(b_non.mean()) if nB > 0 else np.nan
+
+                # значимость (Welch t-test)
+                if nA > 1 and nB > 1:
+                    stat, pval = ttest_ind(a_non, b_non, equal_var=False, nan_policy="omit")
+                else:
+                    pval = np.nan
+
+                uplift = ((meanB - meanA) / meanA) if (meanA and meanA != 0 and meanA == meanA and meanB == meanB) else np.nan
+
+                # pooled sd для MDE (приближение; можно оставлять Welch, но MDE обычно по pooled)
+                if nA > 1 and nB > 1:
+                    sdA = float(a_non.std(ddof=1))
+                    sdB = float(b_non.std(ddof=1))
+                    sd_pooled = sqrt(((nA-1)*sdA**2 + (nB-1)*sdB**2) / (nA + nB - 2))
+                else:
+                    sd_pooled = np.nan
+
+                mde = mde_mean(sd_pooled, nA, nB, alpha=alpha, power=power)  # абсолютный MDE
+
+                valA, valB = meanA, meanB
+
+            significant = "YES" if (pval == pval and pval < alpha) else "NO"
+
+            row = {
+                **key,
+                "Metric name": col,
+                group_a: valA,
+                group_b: valB,
+                "Significant?": significant,
+                "p_value": pval,
+                "Uplift": uplift,
+                "MDE": mde,
+                "n_A": nA,
+                "n_B": nB,
+            }
+            out_rows.append(row)
+
+    res = pd.DataFrame(out_rows)
+
+    # красивый формат uplift как %
+    if "Uplift" in res.columns:
+        res["Uplift"] = res["Uplift"].apply(lambda x: np.nan if pd.isna(x) else x)
+
+    return res
+    
+    
+    metrics = [
+    {"name": "conv_offer_to_utilization_2m", "type": "prop"},
+    {"name": "D2P3_FLG", "type": "prop"},
+    {"name": "FPD_7PLUS_FLG", "type": "prop"},
+    {"name": "pd", "type": "mean"},
+    {"name": "prod_disbursement_amt", "type": "mean"},
+    {"name": "prod_loan_term_month", "type": "mean"},
+    {"name": "prod_monthly_credit_rate", "type": "mean"},
+    {"name": "prod_origination_fee_rate", "type": "mean"},
+    {"name": "prod_regular_payment_amt", "type": "mean"},
+    {"name": "prod_vas_flg", "type": "prop"},
+]
+
+tbl = compare_two_groups(
+    df,
+    test_name="RBP_CONT_MIDTERM",
+    group_a="BASIC",
+    group_b="CHALLENGER_AMT",
+    metrics_spec=metrics,
+    cuts=None,          # без разрезов
+    alpha=0.05,
+    power=0.8
+)
+
+tbl
+
+
+
+tbl_term = compare_two_groups(
+    df,
+    test_name="RBP_BAD",
+    group_a="bad_basic",
+    group_b="bad_bad",
+    metrics_spec=[{"name":"D4P12_FLG", "type":"prop"}],
+    cuts=["REQUESTED_TERM", "MAXLOANAMTGROUP"]
+)
+
+# оставить только term=6 и maxloanamtgroup=10k
+tbl_term = tbl_term[(tbl_term["REQUESTED_TERM"] == 6) & (tbl_term["MAXLOANAMTGROUP"] == "10k")]
+tbl_term
