@@ -1730,3 +1730,34 @@ def compute_kpis_for_test_two_groups(
 #     group_b="good_good",
 # )
 # display(kpis)
+
+
+
+import pandas as pd
+import numpy as np
+
+def make_hashable_id(x):
+    # bytes/bytearray -> hex string
+    if isinstance(x, (bytes, bytearray)):
+        return x.hex()
+    # numpy bytes -> decode
+    if isinstance(x, np.bytes_):
+        return bytes(x).hex()
+    # list/array -> stringify (на всякий случай)
+    if isinstance(x, (list, tuple, np.ndarray)):
+        return str(x)
+    return x
+
+def fix_groupby_keys(df: pd.DataFrame, cols):
+    df = df.copy()
+    for c in cols:
+        if c in df.columns:
+            df[c] = df[c].map(make_hashable_id)
+    return df
+
+# Пример: прогоняем ключи, которые используешь в groupby
+key_cols = ["offer_id", "test_name", "test_group"]   # добавь сюда person_rk/agreement_rk если тоже группируешь
+df2_fixed = fix_groupby_keys(df2, key_cols)
+
+# дальше твой groupby уже не упадет
+# offer_df = df2_fixed.groupby(key_cols, dropna=False, as_index=False).agg(...)
