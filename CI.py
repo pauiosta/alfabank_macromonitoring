@@ -960,3 +960,122 @@ out = plot_risk_one_group(
     cut_col="UTIL_MONTH",
     filters={"REQUESTED_TERM": 6, "MAXLOANAMTGROUP": "10k"},
 )
+
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def wilson_ci(k: int, n: int, alpha: float = 0.05):
+    """Wilson score interval for binomial proportion."""
+    if n == 0:
+        return (np.nan, np.nan)
+    # z for two-sided CI
+    z_map = {0.10: 1.6448536269514722, 0.05: 1.959963984540054, 0.01: 2.5758293035489004}
+    z = z_map.get(alpha, 1.959963984540054)
+
+    phat = k / n
+    denom = 1 + (z**2) / n
+    center = (phat + (z**2) / (2*n)) / denom
+    half = (z * np.sqrt((phat*(1-phat) + (z**2)/(4*n)) / n)) / denom
+    lo = max(0.0, center - half)
+    hi = min(1.0, center + half)
+    return lo, hi
+
+def _agg_binom_flag(s: pd.Series, alpha: float = 0.05):
+    """
+    base = кол-во НЕ NaN (наблюдения с определенным флагом)
+    events = сумма флага (1/0), NaN считаем как 0 для событий, но base по ним не растим
+    """
+    base = int(s.notna().sum())
+    events = int(s.fillna(0).sum())
+    rate = events / base if base > 0 else np.nan
+    lo, hi = wilson_ci(events, base, alpha=alpha)
+    return pd.Series({"base": base, "events": events, "rate": rate, "ci_low": lo, "ci_high": hi})
+
+def plot_risk_by_cut_one_group(
+    df: pd.DataFrame,
+    test_name: str,
+    test_group_name: str,
+    metric_cols=("D4P6_FLG", "D4P9_FLG", "D4P12_FLG"),
+    cut_col="REQUESTED_TERM",
+    cut_filter=None,                 # например [6,9,12,15,18]
+    extra_filters=None,              # например {"MAXLOANAMTGROUP": "10k"}
+    alpha=0.05,
+    title=None
+):
+    extra_filters = extra_filters or {}
+
+    d = df.loc[
+        (df["TEST_NAME"] == test_name) &
+        (df["TEST_GROUP_NAME"] == test_group_name)
+    ].copy()
+
+    # доп. фильтры
+    for col, val in extra_filters.items():
+        d = d.loc[d[col] == val]
+
+    if cut_filter is not None:
+        d = d.loc[d[cut_col].isin(cut_filter)]
+
+    if d.empty:
+        raise ValueError("No rows after filters. Check TEST_NAME/TEST_GROUP_NAME/cut/filters.")
+
+    # агрегируем по cut_col для каждой метрики
+    out_parts = []
+    for m in metric_cols:
+        tmp = (
+            d.groupby(cut_col, dropna=False)[m]
+             .apply(lambda s: _agg_binom_flag(s, alpha=alpha))
+             .reset_index()
+        )
+        tmp["METRIC"] = m
+        out_parts.append(tmp)
+
+    out = pd.concat(out_parts, ignore_index=True)
+
+    # сортировка по разрезу (если числовой — по числу)
+    if pd.api.types.is_numeric_dtype(out[cut_col]):
+        out = out.sort_values([cut_col, "METRIC"])
+    else:
+        out = out.sort_values([cut_col, "METRIC"])
+
+    # plot
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    # x positions
+    x_vals = out[cut_col].unique()
+    x_map = {v: i for i, v in enumerate(x_vals)}
+
+    for m in metric_cols:
+        sub = out[out["METRIC"] == m].copy()
+        xs = sub[cut_col].map(x_map).to_numpy()
+        ys = sub["rate"].to_numpy()
+
+        # asymmetric error bars
+        yerr_low = ys - sub["ci_low"].to_numpy()
+        yerr_high = sub["ci_high"].to_numpy() - ys
+        ax.errorbar(xs, ys, yerr=[yerr_low, yerr_high], marker="o", capsize=3, label=m)
+
+    ax.set_xticks(range(len(x_vals)))
+    ax.set_xticklabels([str(v) for v in x_vals], rotation=0)
+    ax.set_xlabel(cut_col)
+    ax.set_ylabel("Risk rate")
+    ax.set_title(title or f"{test_name} / {test_group_name}: risk by {cut_col}")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+    return out
+    
+res = plot_risk_by_cut_one_group(
+    df,
+    test_name="RBP_GOOD",
+    test_group_name="good_good",
+    metric_cols=["D4P6_FLG", "D4P9_FLG", "D4P12_FLG"],
+    cut_col="REQUESTED_TERM",
+    cut_filter=[6,9,12,15,18],
+    extra_filters={"MAXLOANAMTGROUP": "10k"},
+)
+    
