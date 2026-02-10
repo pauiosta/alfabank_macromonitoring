@@ -1334,3 +1334,91 @@ pivots = risk_heatmap_by_term_and_amt(
     amt_col="MAXLOANAMTGROUP",
     metrics=["D4P6_FLG", "D4P9_FLG", "D4P13_FLG"],  # or ["D4P6_FLG","D4P9_FLG","D4P12_FLG"]
 )
+
+
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def plot_risk_heatmap(
+    df: pd.DataFrame,
+    *,
+    test_name: str,
+    test_group_name: str,
+    metric_col: str,
+    term_col: str = "REQUESTED_TERM",
+    amt_col: str = "MAX_LOAN_AMT_GR",
+    term_order=(6, 9, 12, 15, 18),
+    amt_order=("<=10K", "<=25K", "<=35K", "<=45K", "<=55K"),
+    extra_filters: dict | None = None,
+    agg="mean",   # or "mean" if metric already 0/1, or custom
+    title_prefix: str | None = None,
+):
+    d = df.copy()
+
+    # --- filters ---
+    d = d[(d["TEST_NAME"] == test_name) & (d["TEST_GROUP_NAME"] == test_group_name)]
+    if extra_filters:
+        for col, val in extra_filters.items():
+            if isinstance(val, (list, tuple, set)):
+                d = d[d[col].isin(list(val))]
+            else:
+                d = d[d[col].eq(val)]
+
+    # --- enforce category order for axes ---
+    d[term_col] = pd.Categorical(d[term_col], categories=list(term_order), ordered=True)
+    d[amt_col]  = pd.Categorical(d[amt_col],  categories=list(amt_order),  ordered=True)
+
+    # --- risk aggregation (assumes metric is 0/1 flag; mean = rate) ---
+    if agg == "mean":
+        risk = d.groupby([amt_col, term_col], observed=True)[metric_col].mean()
+    else:
+        risk = d.groupby([amt_col, term_col], observed=True)[metric_col].agg(agg)
+
+    pivot = risk.reset_index().pivot(index=amt_col, columns=term_col, values=metric_col)
+
+    # --- plot ---
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+
+    # green(low) -> red(high): use "RdYlGn_r" (reversed)
+    im = ax.imshow(pivot.values, aspect="auto", cmap="RdYlGn_r")
+
+    ax.set_xticks(range(len(pivot.columns)))
+    ax.set_xticklabels([str(x) for x in pivot.columns])
+
+    ax.set_yticks(range(len(pivot.index)))
+    ax.set_yticklabels([str(y) for y in pivot.index])
+
+    ax.set_xlabel(term_col)
+    ax.set_ylabel(amt_col)
+
+    # annotate cells
+    for i in range(pivot.shape[0]):
+        for j in range(pivot.shape[1]):
+            v = pivot.values[i, j]
+            if pd.notna(v):
+                ax.text(j, i, f"{v*100:.1f}%", ha="center", va="center", fontsize=9)
+
+    title = f"{test_name} / {test_group_name} — {metric_col} risk\nY={amt_col}, X={term_col}"
+    if title_prefix:
+        title = f"{title_prefix}\n{title}"
+    ax.set_title(title)
+
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label("Risk rate")
+
+    plt.tight_layout()
+    return pivot, fig, ax
+
+
+# --- Example ---
+# pivot, fig, ax = plot_risk_heatmap(
+#     df,
+#     test_name="RBP_GOOD",
+#     test_group_name="good_supgood",
+#     metric_col="D4P12_FLG",
+#     term_col="REQUESTED_TERM",
+#     amt_col="MAX_LOAN_AMT_GR",
+#     amt_order=("<=10K","<=25K","<=35K","<=45K","<=55K"),
+#     term_order=(6,9,12,15,18),
+# )
+# plt.show()
