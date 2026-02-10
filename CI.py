@@ -1190,3 +1190,147 @@ def plot_risk_by_cut_one_group(
 
     return out
     
+    
+    
+    
+import re
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def _try_parse_number(x):
+    """Extract first number from a string like '<=10K', '10k', '35K', '10000'."""
+    if pd.isna(x):
+        return np.nan
+    s = str(x).lower().replace(",", "").strip()
+    m = re.search(r"(\d+(\.\d+)?)", s)
+    if not m:
+        return np.nan
+    val = float(m.group(1))
+    # crude K handling: if contains 'k' -> thousands
+    if "k" in s:
+        val *= 1000
+    return val
+
+def _sort_terms(values):
+    vals = pd.Series(values).dropna().unique()
+    # numeric if possible
+    try:
+        nums = pd.to_numeric(vals)
+        return sorted(nums)
+    except Exception:
+        # fallback string sort
+        return sorted(vals, key=lambda x: str(x))
+
+def _sort_amt_groups(values):
+    vals = pd.Series(values).dropna().unique()
+    # sort by extracted numeric
+    return sorted(vals, key=lambda x: (_try_parse_number(x), str(x)))
+
+def risk_heatmap_by_term_and_amt(
+    df: pd.DataFrame,
+    test_name: str,
+    test_group_name: str,
+    term_col: str = "REQUESTED_TERM",
+    amt_col: str = "MAXLOANAMTGROUP",
+    metrics: list = None,
+    alpha: float = 0.05,  # not used here (no CI on heatmap), left for compatibility
+):
+    """
+    Builds heatmaps: X=term_col, Y=amt_col, values=risk rate for each metric flag column.
+    Risk is calculated as events/base where:
+      base = count of non-null values in metric column
+      events = sum of metric values with NaN treated as 0
+    """
+    if metrics is None:
+        metrics = ["D4P6_FLG", "D4P9_FLG", "D4P13_FLG"]
+
+    # basic checks
+    need_cols = ["TEST_NAME", "TEST_GROUP_NAME", term_col, amt_col]
+    missing = [c for c in need_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    # filter one test + one group
+    d = df.loc[
+        (df["TEST_NAME"].eq(test_name)) &
+        (df["TEST_GROUP_NAME"].eq(test_group_name))
+    ].copy()
+
+    if d.empty:
+        raise ValueError("No rows after filtering by TEST_NAME and TEST_GROUP_NAME.")
+
+    # metric name sanity check (common case: D4P12 instead of D4P13)
+    for m in metrics:
+        if m not in d.columns:
+            hint = ""
+            if m.upper() == "D4P13_FLG" and "D4P12_FLG" in d.columns:
+                hint = " (Hint: you likely want 'D4P12_FLG' instead of 'D4P13_FLG')"
+            raise ValueError(f"Metric column '{m}' not found in df.{hint}")
+
+    # ensure term is numeric-ish if possible
+    # (we don't force convert, just sorting)
+    term_order = _sort_terms(d[term_col])
+    amt_order = _sort_amt_groups(d[amt_col])
+
+    pivots = {}
+
+    for metric in metrics:
+        tmp = d[[term_col, amt_col, metric]].copy()
+        tmp["base"] = tmp[metric].notna().astype(int)
+        tmp["events"] = tmp[metric].fillna(0).astype(float)
+
+        agg = (
+            tmp.groupby([amt_col, term_col], dropna=False)
+               .agg(base=("base", "sum"), events=("events", "sum"))
+               .reset_index()
+        )
+        agg["rate"] = np.where(agg["base"] > 0, agg["events"] / agg["base"], np.nan)
+
+        pivot = agg.pivot(index=amt_col, columns=term_col, values="rate")
+        # reindex to stable order
+        pivot = pivot.reindex(index=amt_order)
+        pivot = pivot.reindex(columns=term_order)
+
+        pivots[metric] = pivot
+
+        # ---- plot heatmap ----
+        fig, ax = plt.subplots(figsize=(1.2 * max(6, len(pivot.columns)), 0.5 * max(6, len(pivot.index))))
+        data = pivot.values
+
+        im = ax.imshow(data, aspect="auto")
+
+        ax.set_title(f"{test_name} / {test_group_name} — {metric} risk\nY={amt_col}, X={term_col}")
+        ax.set_xlabel(term_col)
+        ax.set_ylabel(amt_col)
+
+        ax.set_xticks(np.arange(len(pivot.columns)))
+        ax.set_xticklabels(pivot.columns)
+        ax.set_yticks(np.arange(len(pivot.index)))
+        ax.set_yticklabels(pivot.index)
+
+        # annotate cells with %
+        for i in range(data.shape[0]):
+            for j in range(data.shape[1]):
+                v = data[i, j]
+                if np.isfinite(v):
+                    ax.text(j, i, f"{v*100:.1f}%", ha="center", va="center", fontsize=8)
+
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label("Risk rate")
+
+        plt.tight_layout()
+        plt.show()
+
+    return pivots
+
+# ---- Example usage ----
+# NOTE: if you don't have D4P13_FLG, replace it with D4P12_FLG
+pivots = risk_heatmap_by_term_and_amt(
+    df,
+    test_name="RBP_AVG",
+    test_group_name="avg_good",
+    term_col="REQUESTED_TERM",
+    amt_col="MAXLOANAMTGROUP",
+    metrics=["D4P6_FLG", "D4P9_FLG", "D4P13_FLG"],  # or ["D4P6_FLG","D4P9_FLG","D4P12_FLG"]
+)
