@@ -433,3 +433,215 @@ tbl_term = compare_two_groups(
 # оставить только term=6 и maxloanamtgroup=10k
 tbl_term = tbl_term[(tbl_term["REQUESTED_TERM"] == 6) & (tbl_term["MAXLOANAMTGROUP"] == "10k")]
 tbl_term
+
+
+
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+def plot_two_distributions(
+    df: pd.DataFrame,
+    test_name: str,
+    group_a: str,
+    group_b: str,
+    col: str,
+    bins: int = 30,
+    normalize: str = "density",   # "density" or "count"
+    dropna: bool = True,
+    title: str | None = None,
+):
+    """
+    One chart: two distributions (A vs B) inside one test for a chosen column.
+
+    normalize:
+      - "density" -> probability density (areas ~ 1)
+      - "count"   -> raw counts
+    """
+    d = df[df["TEST_NAME"].eq(test_name)].copy()
+
+    if dropna:
+        d = d[d[col].notna()]
+
+    a = d[d["TEST_GROUP_NAME"].eq(group_a)][col]
+    b = d[d["TEST_GROUP_NAME"].eq(group_b)][col]
+
+    # Convert to numeric if possible (safe for ints/floats stored as strings)
+    a = pd.to_numeric(a, errors="coerce")
+    b = pd.to_numeric(b, errors="coerce")
+    a = a.dropna()
+    b = b.dropna()
+
+    if a.empty or b.empty:
+        raise ValueError(
+            f"No data after filtering. Sizes: A={len(a)}, B={len(b)}. "
+            f"Check test_name/group names/column."
+        )
+
+    # Shared bin edges so histograms are comparable
+    data_min = np.nanmin([a.min(), b.min()])
+    data_max = np.nanmax([a.max(), b.max()])
+    if data_min == data_max:
+        data_min -= 0.5
+        data_max += 0.5
+    bin_edges = np.linspace(data_min, data_max, bins + 1)
+
+    density = (normalize == "density")
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    ax.hist(a, bins=bin_edges, alpha=0.45, density=density, label=f"{group_a} (n={len(a)})")
+    ax.hist(b, bins=bin_edges, alpha=0.45, density=density, label=f"{group_b} (n={len(b)})")
+
+    ax.set_xlabel(col)
+    ax.set_ylabel("Density" if density else "Count")
+    ax.legend()
+
+    if title is None:
+        title = f"{test_name}: {col} distribution — {group_a} vs {group_b}"
+    ax.set_title(title)
+
+    plt.tight_layout()
+    plt.show()
+
+
+# ---- Example usage ----
+# plot_two_distributions(
+#     df,
+#     test_name="RBP_GOOD",
+#     group_a="good_basic",
+#     group_b="good_good",
+#     col="REQUESTED_TERM",
+#     bins=20,
+#     normalize="density",
+# )
+
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+def wilson_ci(k: int, n: int, alpha: float = 0.05):
+    """Wilson score CI for binomial proportion."""
+    if n == 0:
+        return (np.nan, np.nan)
+    # z for common alphas (two-sided)
+    z_map = {0.10: 1.6448536269514722, 0.05: 1.959963984540054, 0.01: 2.5758293035489004}
+    z = z_map.get(alpha, 1.959963984540054)
+
+    phat = k / n
+    denom = 1.0 + (z**2) / n
+    center = (phat + (z**2) / (2*n)) / denom
+    half = (z * np.sqrt((phat*(1-phat) + (z**2)/(4*n)) / n)) / denom
+    lo = max(0.0, center - half)
+    hi = min(1.0, center + half)
+    return lo, hi
+
+
+def plot_risk_by_term_two_groups(
+    df: pd.DataFrame,
+    test_name: str,
+    group_a: str,
+    group_b: str,
+    metric_col: str,                 # e.g. "D4P12_FLG" / "D4P6_FLG" / "FPD_7PLUS_FLG"
+    term_col: str = "REQUESTED_TERM",
+    alpha: float = 0.05,
+    term_filter: list[int] | None = None,   # e.g. [6, 9, 12, 18]
+    extra_filters: dict | None = None,      # e.g. {"MAXLOANAMTGROUP": "10k"}
+    title: str | None = None,
+):
+    """
+    Risk (rate) by requested term for two groups within one test.
+    Computes base/events/rate + Wilson CI and plots rate with errorbars.
+    """
+    d = df[df["TEST_NAME"].eq(test_name)].copy()
+
+    # optional extra filters
+    if extra_filters:
+        for c, v in extra_filters.items():
+            d = d[d[c].eq(v)]
+
+    # term filter
+    if term_filter is not None:
+        d = d[d[term_col].isin(term_filter)]
+
+    # keep only needed groups
+    d = d[d["TEST_GROUP_NAME"].isin([group_a, group_b])].copy()
+
+    # ensure term numeric (safe)
+    d[term_col] = pd.to_numeric(d[term_col], errors="coerce")
+    d = d[d[term_col].notna()].copy()
+
+    # metric to numeric (0/1); NaN means "not matured" and excluded from base
+    m = pd.to_numeric(d[metric_col], errors="coerce")
+    d["_m"] = m
+
+    def agg_group(g: pd.DataFrame):
+        base = int(g["_m"].notna().sum())
+        events = int(g["_m"].fillna(0).sum())  # assumes flags are 0/1
+        rate = events / base if base > 0 else np.nan
+        lo, hi = wilson_ci(events, base, alpha=alpha)
+        return pd.Series({"base": base, "events": events, "rate": rate, "ci_low": lo, "ci_high": hi})
+
+    out = (
+        d.groupby(["TEST_GROUP_NAME", term_col], dropna=False)
+         .apply(agg_group)
+         .reset_index()
+         .sort_values([term_col, "TEST_GROUP_NAME"])
+    )
+
+    # Split for plotting
+    a = out[out["TEST_GROUP_NAME"].eq(group_a)].sort_values(term_col)
+    b = out[out["TEST_GROUP_NAME"].eq(group_b)].sort_values(term_col)
+
+    if a.empty or b.empty:
+        raise ValueError(
+            f"No data to plot. After filters, rows: A={len(a)}, B={len(b)}. "
+            f"Check test/group/metric/filters."
+        )
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    # error bars are asymmetric
+    ax.errorbar(
+        a[term_col], a["rate"],
+        yerr=[a["rate"] - a["ci_low"], a["ci_high"] - a["rate"]],
+        fmt="o-", capsize=3, label=f"{group_a}"
+    )
+    ax.errorbar(
+        b[term_col], b["rate"],
+        yerr=[b["rate"] - b["ci_low"], b["ci_high"] - b["rate"]],
+        fmt="o-", capsize=3, label=f"{group_b}"
+    )
+
+    ax.set_xlabel(term_col)
+    ax.set_ylabel(f"Risk rate ({metric_col})")
+    ax.set_xticks(sorted(pd.unique(out[term_col].dropna()).tolist()))
+    ax.legend()
+
+    if title is None:
+        title = f"{test_name}: {metric_col} risk by {term_col} — {group_a} vs {group_b}"
+        if extra_filters:
+            title += " | " + ", ".join([f"{k}={v}" for k, v in extra_filters.items()])
+    ax.set_title(title)
+
+    plt.tight_layout()
+    plt.show()
+
+    return out
+
+
+# ---- Example usage ----
+# res = plot_risk_by_term_two_groups(
+#     df,
+#     test_name="RBP_GOOD",
+#     group_a="good_basic",
+#     group_b="good_good",
+#     metric_col="D4P12_FLG",
+#     term_col="REQUESTED_TERM",
+#     alpha=0.05,
+#     term_filter=[6,9,12,15,18],
+#     extra_filters={"MAXLOANAMTGROUP": "10k"}  # optional
+# )
+# res
+
