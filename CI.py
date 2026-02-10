@@ -1546,3 +1546,187 @@ risk_p, n_p, fig, ax = plot_risk_heatmap_with_n(
     clip_q=0.95,
 )
 plt.show()
+
+
+
+import numpy as np
+import pandas as pd
+
+# ============================================================
+# CONFIG: rename these column names to match your dataframe
+# ============================================================
+COL = {
+    # experiment
+    "test_name": "TEST_NAME",
+    "test_group": "TEST_GROUP_NAME",
+
+    # unique offer id
+    "offer_id": "OFFER_RK",
+
+    # dates
+    "offer_create_dt": "offer_creation_dttm",
+    "app_create_dt": "app_creation_dttm",
+    "app_form_filled_dt": "app_form_filled_dttm",
+    "util_dt": "utilization_dttm",
+
+    # finance
+    "npv": "NPV",                     # NPV value (may appear multiple rows per offer)
+    "disb_amt": "DISBURSEMENT_AMT",   # financial amount / issuance amount (0 if not issued)
+}
+
+# ============================================================
+# Helpers
+# ============================================================
+def _to_dt(s: pd.Series) -> pd.Series:
+    if np.issubdtype(s.dtype, np.datetime64):
+        return s
+    return pd.to_datetime(s, errors="coerce")
+
+def _days_diff(later: pd.Series, earlier: pd.Series) -> pd.Series:
+    return (later - earlier).dt.days
+
+def _conv_from_start_to_event(start_dt, event_dt, now, window_days):
+    age = _days_diff(now, start_dt)
+    diff = _days_diff(event_dt, start_dt)
+    return np.where(
+        age <= window_days,
+        np.nan,
+        np.where(event_dt.notna() & (diff <= window_days), 1.0, 0.0),
+    )
+
+def _conv_from_app_to_event(app_dt, event_dt, now, window_days):
+    age = _days_diff(now, app_dt)
+    diff = _days_diff(event_dt, app_dt)
+    return np.where(
+        app_dt.isna(),
+        np.nan,
+        np.where(
+            age <= window_days,
+            np.nan,
+            np.where(event_dt.notna() & (diff <= window_days), 1.0, 0.0),
+        ),
+    )
+
+# ============================================================
+# Main: KPIs for ONE test and TWO groups only
+# ============================================================
+def compute_kpis_for_test_two_groups(
+    df: pd.DataFrame,
+    test_name: str,
+    group_a: str,
+    group_b: str,
+    col=COL,
+    now=None,
+) -> pd.DataFrame:
+    d = df.copy()
+
+    # filter to one test + two groups
+    mask = (
+        d[col["test_name"]].astype(str).eq(str(test_name)) &
+        d[col["test_group"]].astype(str).isin([str(group_a), str(group_b)])
+    )
+    d = d.loc[mask].copy()
+    if d.empty:
+        raise ValueError("No rows after filtering by test_name and two groups. Check names/columns.")
+
+    # datetimes
+    d[col["offer_create_dt"]] = _to_dt(d[col["offer_create_dt"]])
+    d[col["app_create_dt"]] = _to_dt(d[col["app_create_dt"]])
+    d[col["app_form_filled_dt"]] = _to_dt(d[col["app_form_filled_dt"]])
+    d[col["util_dt"]] = _to_dt(d[col["util_dt"]])
+
+    now = pd.Timestamp.now().normalize() if now is None else pd.Timestamp(now).normalize()
+
+    # conversions (row-level)
+    d["conv_offer_to_new_app_1m"] = _conv_from_start_to_event(
+        d[col["offer_create_dt"]], d[col["app_create_dt"]], now=now, window_days=30
+    )
+    d["conv_offer_to_full_app_1m"] = _conv_from_start_to_event(
+        d[col["offer_create_dt"]], d[col["app_form_filled_dt"]], now=now, window_days=30
+    )
+    d["conv_offer_to_utilization_1m"] = _conv_from_start_to_event(
+        d[col["offer_create_dt"]], d[col["util_dt"]], now=now, window_days=30
+    )
+    d["conv_offer_to_utilization_2m"] = _conv_from_start_to_event(
+        d[col["offer_create_dt"]], d[col["util_dt"]], now=now, window_days=60
+    )
+    d["conv_new_app_to_utilization_5d"] = _conv_from_app_to_event(
+        d[col["app_create_dt"]], d[col["util_dt"]], now=now, window_days=5
+    )
+    d["conv_new_app_to_full_app_5d"] = _conv_from_app_to_event(
+        d[col["app_create_dt"]], d[col["app_form_filled_dt"]], now=now, window_days=5
+    )
+
+    conv_cols = [
+        "conv_offer_to_new_app_1m",
+        "conv_offer_to_full_app_1m",
+        "conv_offer_to_utilization_1m",
+        "conv_offer_to_utilization_2m",
+        "conv_new_app_to_utilization_5d",
+        "conv_new_app_to_full_app_5d",
+    ]
+
+    # offer-level aggregation (handles multiple rows per offer)
+    agg_dict = {
+        col["npv"]: "sum",
+        col["disb_amt"]: "sum",
+        col["util_dt"]: lambda x: int(pd.Series(x).notna().any()),
+    }
+    for c in conv_cols:
+        agg_dict[c] = lambda x: pd.Series(x).max(skipna=True)
+
+    offer_df = (
+        d[[col["offer_id"], col["test_name"], col["test_group"], col["npv"], col["disb_amt"], col["util_dt"]] + conv_cols]
+        .groupby([col["offer_id"], col["test_name"], col["test_group"]], dropna=False, as_index=False)
+        .agg(agg_dict)
+        .rename(columns={col["util_dt"]: "UTIL_FLG"})
+    )
+
+    def _rate(s: pd.Series) -> float:
+        s2 = s.dropna()
+        return float(s2.mean()) if len(s2) else np.nan
+
+    # group-level KPIs
+    out = []
+    for grp_name, gdf in offer_df.groupby(col["test_group"], dropna=False):
+        npv_total = float(gdf[col["npv"]].sum(skipna=True))
+        n_offers = int(gdf.shape[0])
+        n_util = int(gdf["UTIL_FLG"].sum(skipna=True))
+        fin_total = float(gdf[col["disb_amt"]].sum(skipna=True))
+
+        row = {
+            "TEST_NAME": test_name,
+            "TEST_GROUP_NAME": grp_name,
+            "NPV_TOTAL": npv_total,
+            "NPV_PER_OFFER": (npv_total / n_offers) if n_offers else np.nan,
+            "NPV_PER_UTIL": (npv_total / n_util) if n_util else np.nan,
+            "NPV_PER_FIN_AMOUNT": (npv_total / fin_total) if fin_total else np.nan,
+            "N_OFFERS": n_offers,
+            "N_UTIL_OFFERS": n_util,
+            "FIN_AMOUNT_TOTAL": fin_total,
+        }
+        for c in conv_cols:
+            row[c] = _rate(gdf[c])
+
+        out.append(row)
+
+    res = pd.DataFrame(out)
+
+    # Ensure output order is exactly group_a then group_b (if present)
+    order = [group_a, group_b]
+    res["__ord"] = res["TEST_GROUP_NAME"].apply(lambda x: order.index(x) if x in order else 999)
+    res = res.sort_values("__ord").drop(columns="__ord").reset_index(drop=True)
+
+    return res
+
+
+# ============================================================
+# USAGE
+# ============================================================
+# kpis = compute_kpis_for_test_two_groups(
+#     df,
+#     test_name="RBP_GOOD",
+#     group_a="good_basic",
+#     group_b="good_good",
+# )
+# display(kpis)
