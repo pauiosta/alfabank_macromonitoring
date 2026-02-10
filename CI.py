@@ -1761,3 +1761,127 @@ df2_fixed = fix_groupby_keys(df2, key_cols)
 
 # дальше твой groupby уже не упадет
 # offer_df = df2_fixed.groupby(key_cols, dropna=False, as_index=False).agg(...)
+
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+# ---------- helpers ----------
+def _welch_ttest(a: pd.Series, b: pd.Series):
+    a = pd.to_numeric(a, errors="coerce").dropna()
+    b = pd.to_numeric(b, errors="coerce").dropna()
+    if len(a) < 2 or len(b) < 2:
+        return np.nan
+    return stats.ttest_ind(a, b, equal_var=False, nan_policy="omit").pvalue
+
+def _two_prop_ztest(success_a, n_a, success_b, n_b):
+    # returns p-value for H0: p_a == p_b
+    if n_a == 0 or n_b == 0:
+        return np.nan
+    p_pool = (success_a + success_b) / (n_a + n_b)
+    se = np.sqrt(p_pool * (1 - p_pool) * (1/n_a + 1/n_b))
+    if se == 0:
+        return np.nan
+    z = (success_a/n_a - success_b/n_b) / se
+    return 2 * (1 - stats.norm.cdf(abs(z)))
+
+def add_significance_for_two_groups(
+    df: pd.DataFrame,
+    kpis: pd.DataFrame,
+    test_name: str,
+    group_a: str,
+    group_b: str,
+    cols: dict,
+    conv_cols: list,
+    alpha: float = 0.05,
+) -> pd.DataFrame:
+    """
+    df: raw offer-level dataframe
+    kpis: output of compute_kpis_for_test_two_groups (2 rows: group_a & group_b)
+    cols: mapping of column names in df
+      required keys:
+        'offer_id', 'test_name', 'test_group', 'npv', 'fin_amount', 'util_dttm'
+    conv_cols: list of conversion flag columns already computed in df (0/1 or bool or NULL)
+    """
+
+    # filter to one test and two groups
+    d = df.loc[
+        df[cols["test_name"]].eq(test_name) &
+        df[cols["test_group"]].isin([group_a, group_b])
+    ].copy()
+
+    # one row per offer_id (важно чтобы не дублировались офферы)
+    # npv / fin_amount — берём первое/сумму? обычно 1 запись на offer_id; если дубль — берём max/first
+    agg = {
+        cols["npv"]: "sum",              # если NPV по офферу может быть по строкам — суммируем
+        cols["fin_amount"]: "sum",       # аналогично
+        cols["util_dttm"]: lambda x: x.notna().any(),  # флаг утилизации
+    }
+    for c in conv_cols:
+        agg[c] = lambda x: pd.Series(x).dropna().astype(int).max() if pd.Series(x).dropna().shape[0] else 0
+
+    offer = (
+        d.groupby([cols["offer_id"], cols["test_name"], cols["test_group"]], as_index=False)
+         .agg(agg)
+         .rename(columns={cols["util_dttm"]: "UTIL_FLG"})
+    )
+
+    # derived per-offer metrics for tests
+    offer["NPV_PER_OFFER_ROW"] = offer[cols["npv"]]
+    offer["NPV_PER_FIN_AMOUNT_ROW"] = offer[cols["npv"]] / offer[cols["fin_amount"]].replace({0: np.nan})
+    offer["NPV_PER_UTIL_ROW"] = np.where(offer["UTIL_FLG"], offer[cols["npv"]], np.nan)
+
+    # split groups
+    A = offer.loc[offer[cols["test_group"]].eq(group_a)]
+    B = offer.loc[offer[cols["test_group"]].eq(group_b)]
+
+    # p-values
+    p_npv_per_offer = _welch_ttest(A["NPV_PER_OFFER_ROW"], B["NPV_PER_OFFER_ROW"])
+    p_npv_per_util  = _welch_ttest(A["NPV_PER_UTIL_ROW"],  B["NPV_PER_UTIL_ROW"])
+    p_npv_per_fin   = _welch_ttest(A["NPV_PER_FIN_AMOUNT_ROW"], B["NPV_PER_FIN_AMOUNT_ROW"])
+
+    # conversion p-values
+    conv_pvals = {}
+    for c in conv_cols:
+        # конверсия по офферам: success = sum(flag), n = #offers
+        succ_a, n_a = int(A[c].sum()), int(len(A))
+        succ_b, n_b = int(B[c].sum()), int(len(B))
+        conv_pvals[c] = _two_prop_ztest(succ_a, n_a, succ_b, n_b)
+
+    # attach to KPI table (в виде отдельных колонок)
+    out = kpis.copy()
+
+    # метрики как в твоей таблице
+    # (NPV_TOTAL — без pvalue)
+    out["PVAL_NPV_PER_OFFER"] = p_npv_per_offer
+    out["PVAL_NPV_PER_UTIL"]  = p_npv_per_util
+    out["PVAL_NPV_PER_FIN_AMOUNT"] = p_npv_per_fin
+
+    # add conversions p-values
+    for c, pv in conv_pvals.items():
+        out[f"PVAL_{c}"] = pv
+
+    # significance flags
+    out["SIG_NPV_PER_OFFER"] = out["PVAL_NPV_PER_OFFER"].lt(alpha)
+    out["SIG_NPV_PER_UTIL"]  = out["PVAL_NPV_PER_UTIL"].lt(alpha)
+    out["SIG_NPV_PER_FIN_AMOUNT"] = out["PVAL_NPV_PER_FIN_AMOUNT"].lt(alpha)
+    for c in conv_cols:
+        out[f"SIG_{c}"] = out[f"PVAL_{c}"].lt(alpha)
+
+    return out
+
+
+# ---------- Example usage ----------
+# cols = {
+#   "offer_id": "OFFER_RK",
+#   "test_name": "TEST_NAME",
+#   "test_group": "TEST_GROUP_NAME",
+#   "npv": "NPV",
+#   "fin_amount": "FIN_AMOUNT",      # сумма выдачи
+#   "util_dttm": "UTILIZATION_DTTM", # дата утилизации
+# }
+# conv_cols = ["CONV_OFFER_TO_UTILIZATION_2M"]  # и любые другие конверсии, которые ты считаешь
+#
+# kpis = compute_kpis_for_test_two_groups(df, test_name="RBP_GOOD", group_a="good_basic", group_b="good_good")
+# kpis_sig = add_significance_for_two_groups(df, kpis, "RBP_GOOD", "good_basic", "good_good", cols, conv_cols, alpha=0.05)
+# display(kpis_sig)
