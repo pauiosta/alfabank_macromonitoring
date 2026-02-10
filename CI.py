@@ -712,4 +712,151 @@ def plot_maxloanamtgroup_distribution(
 #     col="MAXLOANAMTGROUP",
 #     normalize=True
 # )
-# dist
+# 
+
+
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def wilson_ci(k: int, n: int, alpha: float = 0.05):
+    if n == 0:
+        return (np.nan, np.nan)
+    z_map = {0.10: 1.6448536269514722, 0.05: 1.959963984540054, 0.01: 2.5758293035489004}
+    z = z_map.get(alpha, 1.959963984540054)
+
+    phat = k / n
+    denom = 1.0 + (z**2) / n
+    center = (phat + (z**2) / (2*n)) / denom
+    half = (z * np.sqrt((phat*(1-phat) + (z**2)/(4*n)) / n)) / denom
+    lo = max(0.0, center - half)
+    hi = min(1.0, center + half)
+    return lo, hi
+
+
+def plot_risk_by_amt_two_groups(
+    df: pd.DataFrame,
+    test_name: str,
+    group_a: str,
+    group_b: str,
+    metric_col: str,                      # e.g. "D4P12_FLG"
+    amt_col: str = "MAXLOANAMTGROUP",     # bucket column like "10k", "25k", etc.
+    alpha: float = 0.05,
+    amt_order: list[str] | None = None,  # optional explicit order: ["10k","25k","50k"]
+    extra_filters: dict | None = None,   # e.g. {"REQUESTED_TERM": 6}
+    title: str | None = None,
+):
+    """
+    Risk (rate) by amount bucket (MAXLOANAMTGROUP) for two groups within one test.
+    Computes base/events/rate + Wilson CI and plots rate with errorbars.
+    """
+    d = df[df["TEST_NAME"].eq(test_name)].copy()
+
+    if extra_filters:
+        for c, v in extra_filters.items():
+            d = d[d[c].eq(v)]
+
+    d = d[d["TEST_GROUP_NAME"].isin([group_a, group_b])].copy()
+
+    # metric: NaN means not matured => excluded from base
+    d["_m"] = pd.to_numeric(d[metric_col], errors="coerce")
+
+    # keep amount bucket as string/categorical
+    d[amt_col] = d[amt_col].astype(str)
+    d = d[d[amt_col].notna()].copy()
+
+    def agg_group(g: pd.DataFrame) -> pd.Series:
+        base = int(g["_m"].notna().sum())
+        events = int(g["_m"].fillna(0).sum())
+        rate = events / base if base > 0 else np.nan
+        lo, hi = wilson_ci(events, base, alpha=alpha)
+        return pd.Series({"base": base, "events": events, "rate": rate, "ci_low": lo, "ci_high": hi})
+
+    out = (
+        d.groupby(["TEST_GROUP_NAME", amt_col], dropna=False)
+         .apply(agg_group)
+         .reset_index()
+    )
+
+    # Ordering of buckets
+    if amt_order is None:
+        # Try numeric sorting from strings like "10k", "25k", "10000", "10,000"
+        def to_num(x: str):
+            s = str(x).lower().replace(",", "").replace(" ", "")
+            s = s.replace("php", "").replace("₱", "")
+            if s.endswith("k"):
+                try:
+                    return float(s[:-1]) * 1000
+                except:
+                    return np.nan
+            try:
+                return float(s)
+            except:
+                return np.nan
+
+        uniq = out[amt_col].dropna().unique().tolist()
+        amt_order = sorted(uniq, key=lambda x: (np.isnan(to_num(x)), to_num(x), str(x)))
+
+    # make categorical to control plot order
+    out[amt_col] = pd.Categorical(out[amt_col], categories=amt_order, ordered=True)
+    out = out.sort_values([amt_col, "TEST_GROUP_NAME"])
+
+    a = out[out["TEST_GROUP_NAME"].eq(group_a)].sort_values(amt_col)
+    b = out[out["TEST_GROUP_NAME"].eq(group_b)].sort_values(amt_col)
+
+    if a.empty or b.empty:
+        raise ValueError(
+            f"No data to plot. After filters, rows: A={len(a)}, B={len(b)}. "
+            f"Check test/group/metric/filters."
+        )
+
+    x = np.arange(len(amt_order))
+    map_x = {cat: i for i, cat in enumerate(amt_order)}
+    ax_x_a = a[amt_col].astype(str).map(map_x).to_numpy()
+    ax_x_b = b[amt_col].astype(str).map(map_x).to_numpy()
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+
+    ax.errorbar(
+        ax_x_a, a["rate"],
+        yerr=[a["rate"] - a["ci_low"], a["ci_high"] - a["rate"]],
+        fmt="o-", capsize=3, label=f"{group_a}"
+    )
+    ax.errorbar(
+        ax_x_b, b["rate"],
+        yerr=[b["rate"] - b["ci_low"], b["ci_high"] - b["rate"]],
+        fmt="o-", capsize=3, label=f"{group_b}"
+    )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(amt_order, rotation=0)
+    ax.set_xlabel(amt_col)
+    ax.set_ylabel(f"Risk rate ({metric_col})")
+    ax.legend()
+
+    if title is None:
+        title = f"{test_name}: {metric_col} risk by {amt_col} — {group_a} vs {group_b}"
+        if extra_filters:
+            title += " | " + ", ".join([f"{k}={v}" for k, v in extra_filters.items()])
+    ax.set_title(title)
+
+    plt.tight_layout()
+    plt.show()
+
+    return out
+
+
+# ---- Example usage ----
+# res_amt = plot_risk_by_amt_two_groups(
+#     df,
+#     test_name="RBP_GOOD",
+#     group_a="good_basic",
+#     group_b="good_good",
+#     metric_col="D4P12_FLG",
+#     amt_col="MAXLOANAMTGROUP",
+#     extra_filters={"REQUESTED_TERM": 6},   # optional
+#     alpha=0.05
+# )
+# res_amt
