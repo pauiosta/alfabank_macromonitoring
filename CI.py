@@ -860,3 +860,103 @@ def plot_risk_by_amt_two_groups(
 #     alpha=0.05
 # )
 # res_amt
+
+
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+def wilson_ci(k: int, n: int, alpha: float = 0.05):
+    if n == 0:
+        return (np.nan, np.nan)
+    z_map = {0.10: 1.6448536269514722, 0.05: 1.959963984540054, 0.01: 2.5758293035489004}
+    z = z_map.get(alpha, 1.959963984540054)
+
+    phat = k / n
+    denom = 1.0 + (z**2) / n
+    center = (phat + (z**2) / (2*n)) / denom
+    half = (z * np.sqrt((phat*(1-phat) + (z**2)/(4*n)) / n)) / denom
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
+def plot_risk_one_group(
+    df: pd.DataFrame,
+    test_name: str,
+    group_name: str,
+    metric_col: str,     # e.g. "D4P6_FLG", "D4P12_FLG"
+    cut_col: str,        # e.g. "REQUESTED_TERM" or "MAXLOANAMTGROUP"
+    alpha: float = 0.05,
+    cut_values=None,     # optional list filter: [6,9,12,15,18] or ["10k","25k"]
+    filters: dict | None = None,  # optional extra filters: {"REQUESTED_TERM": 6, "MAXLOANAMTGROUP": "10k"}
+    title: str | None = None,
+):
+    d = df[df["TEST_NAME"].eq(test_name)].copy()
+    d = d[d["TEST_GROUP_NAME"].eq(group_name)].copy()
+
+    if filters:
+        for c, v in filters.items():
+            if c not in d.columns:
+                raise ValueError(f"Filter column '{c}' not found in df.columns")
+            d = d[d[c].eq(v)]
+
+    if cut_col not in d.columns:
+        raise ValueError(f"cut_col '{cut_col}' not found in df.columns")
+
+    if cut_values is not None:
+        d = d[d[cut_col].isin(cut_values)].copy()
+
+    d["_m"] = pd.to_numeric(d[metric_col], errors="coerce")
+
+    # агрегируем риск + CI по cut_col
+    rows = []
+    for val, g in d.groupby(cut_col, dropna=False):
+        base = int(g["_m"].notna().sum())
+        events = int(g["_m"].fillna(0).sum())
+        rate = events / base if base > 0 else np.nan
+        lo, hi = wilson_ci(events, base, alpha=alpha)
+        rows.append((val, base, events, rate, lo, hi))
+
+    out = pd.DataFrame(rows, columns=[cut_col, "base", "events", "rate", "ci_low", "ci_high"])
+
+    # сортировка (если числа — по числам)
+    try:
+        out["_cut_num"] = pd.to_numeric(out[cut_col], errors="coerce")
+        if out["_cut_num"].notna().any():
+            out = out.sort_values(["_cut_num", cut_col])
+        else:
+            out = out.sort_values(cut_col)
+        out = out.drop(columns=["_cut_num"])
+    except Exception:
+        out = out.sort_values(cut_col)
+
+    if out.empty:
+        raise ValueError("No data after filters (out is empty). Check test/group/metric/cut/filters.")
+
+    # --- plot
+    x = out[cut_col].astype(str).tolist()
+    y = out["rate"].astype(float).values
+    yerr_low = y - out["ci_low"].values
+    yerr_high = out["ci_high"].values - y
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.errorbar(x, y, yerr=[yerr_low, yerr_high], fmt="o-", capsize=4)
+    ax.set_xlabel(cut_col)
+    ax.set_ylabel(f"Risk rate ({metric_col})")
+    ax.set_title(title or f"{test_name} / {group_name}: {metric_col} by {cut_col} (Wilson CI)")
+    ax.grid(True, axis="y", alpha=0.3)
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+    plt.show()
+
+    return out
+    
+    
+out = plot_risk_one_group(
+    df,
+    test_name="RBP_GOOD",
+    group_name="good_good",
+    metric_col="D4P12_FLG",
+    cut_col="UTIL_MONTH",
+    filters={"REQUESTED_TERM": 6, "MAXLOANAMTGROUP": "10k"},
+)
