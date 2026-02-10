@@ -1422,3 +1422,127 @@ def plot_risk_heatmap(
 #     term_order=(6,9,12,15,18),
 # )
 # plt.show()
+
+
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib import colors
+
+def plot_risk_heatmap_with_n(
+    df: pd.DataFrame,
+    *,
+    test_name: str,
+    test_group_name: str,
+    metric_col: str,
+    term_col: str = "REQUESTED_TERM",
+    amt_col: str = "MAX_LOAN_AMT_GR",
+    term_order=(6, 9, 12, 15, 18),
+    amt_order=("<=10K", "<=25K", "<=35K", "<=45K", "<=55K"),
+    extra_filters: dict | None = None,
+    # --- color scale control ---
+    scale_mode: str = "clip_quantile",   # "clip_quantile" | "fixed" | "log" | "power"
+    clip_q: float = 0.95,                # used for clip_quantile
+    vmin: float | None = None,           # used for fixed / optional for others
+    vmax: float | None = None,           # used for fixed / optional for others
+    power_gamma: float = 0.6,            # used for power
+    show_n: bool = True,
+    min_n_to_annotate: int = 1,           # show risk only if n >= this
+):
+    d = df.copy()
+    d = d[(d["TEST_NAME"] == test_name) & (d["TEST_GROUP_NAME"] == test_group_name)]
+
+    if extra_filters:
+        for col, val in extra_filters.items():
+            if isinstance(val, (list, tuple, set)):
+                d = d[d[col].isin(list(val))]
+            else:
+                d = d[d[col].eq(val)]
+
+    # enforce axis ordering
+    d[term_col] = pd.Categorical(d[term_col], categories=list(term_order), ordered=True)
+    d[amt_col]  = pd.Categorical(d[amt_col],  categories=list(amt_order),  ordered=True)
+
+    # risk (mean of 0/1 flag) and n
+    g = d.groupby([amt_col, term_col], observed=True)
+    out = g[metric_col].agg(risk="mean", n="size").reset_index()
+
+    risk_pivot = out.pivot(index=amt_col, columns=term_col, values="risk")
+    n_pivot    = out.pivot(index=amt_col, columns=term_col, values="n")
+
+    Z = risk_pivot.values.astype(float)
+
+    # --- normalization to avoid extreme values dominating palette ---
+    finite = np.isfinite(Z)
+    Z_f = Z[finite]
+
+    if scale_mode == "clip_quantile":
+        _vmin = np.nanmin(Z_f) if vmin is None else vmin
+        _vmax = np.nanquantile(Z_f, clip_q) if vmax is None else vmax
+        norm = colors.Normalize(vmin=_vmin, vmax=_vmax, clip=True)
+
+    elif scale_mode == "fixed":
+        if vmin is None or vmax is None:
+            raise ValueError("For scale_mode='fixed' please set both vmin and vmax (e.g. 0 and 0.35).")
+        norm = colors.Normalize(vmin=vmin, vmax=vmax, clip=True)
+
+    elif scale_mode == "log":
+        # log needs positive vmin; add small epsilon if zeros exist
+        eps = 1e-6
+        _vmin = max(eps, (np.nanmin(Z_f) if vmin is None else vmin))
+        _vmax = np.nanmax(Z_f) if vmax is None else vmax
+        norm = colors.LogNorm(vmin=_vmin, vmax=_vmax, clip=True)
+
+    elif scale_mode == "power":
+        _vmin = np.nanmin(Z_f) if vmin is None else vmin
+        _vmax = np.nanmax(Z_f) if vmax is None else vmax
+        norm = colors.PowerNorm(gamma=power_gamma, vmin=_vmin, vmax=_vmax, clip=True)
+
+    else:
+        raise ValueError("Unknown scale_mode. Use: clip_quantile | fixed | log | power")
+
+    # --- plot ---
+    fig, ax = plt.subplots(figsize=(10.5, 4.8))
+    im = ax.imshow(Z, aspect="auto", cmap="RdYlGn_r", norm=norm)
+
+    ax.set_xticks(range(len(risk_pivot.columns)))
+    ax.set_xticklabels([str(x) for x in risk_pivot.columns])
+    ax.set_yticks(range(len(risk_pivot.index)))
+    ax.set_yticklabels([str(y) for y in risk_pivot.index])
+    ax.set_xlabel(term_col)
+    ax.set_ylabel(amt_col)
+
+    ax.set_title(f"{test_name} / {test_group_name} — {metric_col} risk\nY={amt_col}, X={term_col}")
+
+    # annotate: risk + n
+    for i in range(risk_pivot.shape[0]):
+        for j in range(risk_pivot.shape[1]):
+            v = Z[i, j]
+            n = n_pivot.values[i, j] if n_pivot is not None else np.nan
+            if np.isfinite(v) and (pd.isna(n) or n >= min_n_to_annotate):
+                txt = f"{v*100:.1f}%"
+                if show_n and pd.notna(n):
+                    txt += f"\n(n={int(n)})"
+                ax.text(j, i, txt, ha="center", va="center", fontsize=8)
+
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label("Risk rate")
+
+    plt.tight_layout()
+    return risk_pivot, n_pivot, fig, ax
+    
+    
+risk_p, n_p, fig, ax = plot_risk_heatmap_with_n(
+    df,
+    test_name="RBP_GOOD",
+    test_group_name="good_good",
+    metric_col="D4P12_FLG",
+    amt_col="MAX_LOAN_AMT_GR",
+    term_col="REQUESTED_TERM",
+    amt_order=("<=10K","<=25K","<=35K","<=45K","<=55K"),
+    term_order=(6,9,12,15,18),
+    scale_mode="clip_quantile",
+    clip_q=0.95,
+)
+plt.show()
