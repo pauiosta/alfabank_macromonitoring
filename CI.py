@@ -645,3 +645,71 @@ def plot_risk_by_term_two_groups(
 # )
 # res
 
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+def plot_maxloanamtgroup_distribution(
+    df: pd.DataFrame,
+    test_name: str,
+    group_a: str,
+    group_b: str,
+    col: str = "MAXLOANAMTGROUP",
+    normalize: bool = True,          # True -> доли, False -> counts
+    extra_filters: dict | None = None,
+    title: str | None = None,
+):
+    d = df[df["TEST_NAME"].eq(test_name)].copy()
+    d = d[d["TEST_GROUP_NAME"].isin([group_a, group_b])].copy()
+
+    if extra_filters:
+        for c, v in extra_filters.items():
+            d = d[d[c].eq(v)]
+
+    # считаем распределение
+    tab = (
+        d.pivot_table(index=col, columns="TEST_GROUP_NAME", values="APPLICATION_RK",
+                      aggfunc="count", fill_value=0)
+        .reindex(columns=[group_a, group_b])
+    )
+
+    if normalize:
+        tab = tab.div(tab.sum(axis=0), axis=1)  # доли внутри каждой группы
+
+    # сортировка категорий “по размеру” (если есть числа в строке)
+    def _num(x):
+        s = str(x).lower().replace("<= ", "").replace("<=", "").replace("k", "")
+        try:
+            return float(s)
+        except:
+            return np.nan
+
+    tab = tab.loc[sorted(tab.index, key=lambda x: (np.isnan(_num(x)), _num(x), str(x)))]
+
+    ax = tab.plot(kind="bar", figsize=(10, 5))
+    ax.set_xlabel(col)
+    ax.set_ylabel("Share" if normalize else "Count")
+    ax.legend(title="TEST_GROUP_NAME")
+
+    if title is None:
+        title = f"{test_name}: {col} distribution — {group_a} vs {group_b}"
+        if extra_filters:
+            title += " | " + ", ".join([f"{k}={v}" for k, v in extra_filters.items()])
+    ax.set_title(title)
+
+    plt.tight_layout()
+    plt.show()
+
+    return tab
+
+
+# пример:
+# dist = plot_maxloanamtgroup_distribution(
+#     df,
+#     test_name="RBP_GOOD",
+#     group_a="good_basic",
+#     group_b="good_good",
+#     col="MAXLOANAMTGROUP",
+#     normalize=True
+# )
+# dist
