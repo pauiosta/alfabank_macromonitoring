@@ -168,3 +168,107 @@ agg, ptab, fig, ax = plot_term_aligned_risk(
     alpha=0.05,
 )
 display(ptab)  # если хочешь таблицу с p-values по каждому term
+
+
+
+import numpy as np
+import pandas as pd
+from scipy.stats import pearsonr, spearmanr
+
+def _term_to_metric(term: int) -> str:
+    return f"D4P{int(term)}_FLG"
+
+def corr_term_vs_risk_table(
+    df: pd.DataFrame,
+    test_col: str = "TEST_NAME",
+    group_col: str = "TEST_GROUP_NAME",
+    term_col: str = "REQUESTED_TERM",
+    mode: str = "term_aligned",     # "term_aligned" | "fixed_metric"
+    risk_col: str | None = None,    # нужно только для mode="fixed_metric"
+    min_n_per_term: int = 30,       # минимальный размер на точку term
+    min_terms: int = 3,             # минимум разных term чтобы считать корреляцию
+) -> pd.DataFrame:
+    d = df.copy()
+    d[term_col] = pd.to_numeric(d[term_col], errors="coerce").astype("Int64")
+
+    if mode == "fixed_metric":
+        if not risk_col:
+            raise ValueError("For mode='fixed_metric' you must provide risk_col, e.g. 'D4P12_FLG'")
+        if risk_col not in d.columns:
+            raise ValueError(f"Column '{risk_col}' not found in df")
+        d["_RISK"] = pd.to_numeric(d[risk_col], errors="coerce")
+
+    elif mode == "term_aligned":
+        # выбираем метрику по term и складываем в одну колонку _RISK
+        d["_METRIC"] = d[term_col].astype("Int64").map(lambda x: _term_to_metric(x) if pd.notna(x) else np.nan)
+        d["_RISK"] = np.nan
+        # заполняем _RISK из соответствующих колонок, которые реально есть в df
+        metrics_needed = d["_METRIC"].dropna().unique().tolist()
+        for m in metrics_needed:
+            if m in d.columns:
+                mask = d["_METRIC"].eq(m)
+                d.loc[mask, "_RISK"] = pd.to_numeric(d.loc[mask, m], errors="coerce")
+    else:
+        raise ValueError("mode must be 'term_aligned' or 'fixed_metric'")
+
+    # агрегируем: для каждого test/group/term считаем risk_rate и n
+    agg = (
+        d.dropna(subset=[test_col, group_col, term_col, "_RISK"])
+         .groupby([test_col, group_col, term_col], dropna=False)["_RISK"]
+         .agg(n="count", risk_rate="mean")
+         .reset_index()
+    )
+
+    # фильтр по min_n_per_term
+    agg = agg[agg["n"] >= min_n_per_term].copy()
+
+    # теперь корреляция по точкам (term -> risk_rate) внутри test/group
+    rows = []
+    for (test, grp), sub in agg.groupby([test_col, group_col], dropna=False):
+        sub = sub.sort_values(term_col)
+        if sub[term_col].nunique() < min_terms:
+            continue
+
+        x = sub[term_col].astype(float).to_numpy()
+        y = sub["risk_rate"].astype(float).to_numpy()
+
+        # Pearson
+        pr, pp = pearsonr(x, y)
+        # Spearman
+        sr, sp = spearmanr(x, y)
+
+        rows.append({
+            test_col: test,
+            group_col: grp,
+            "n_terms": int(sub[term_col].nunique()),
+            "sum_n": int(sub["n"].sum()),
+            "pearson_r": pr,
+            "pearson_p": pp,
+            "spearman_rho": sr,
+            "spearman_p": sp,
+        })
+
+    out = pd.DataFrame(rows).sort_values([test_col, group_col]).reset_index(drop=True)
+    return out, agg
+
+
+# ===== Example usage =====
+# 1) Term-aligned (рекомендую)
+corr_tbl, term_points = corr_term_vs_risk_table(
+    df,
+    mode="term_aligned",
+    min_n_per_term=30,
+    min_terms=3,
+)
+
+display(corr_tbl)
+
+# 2) Если хочешь корреляцию именно D4P12 vs term
+# corr_tbl_12, term_points_12 = corr_term_vs_risk_table(
+#     df,
+#     mode="fixed_metric",
+#     risk_col="D4P12_FLG",
+#     min_n_per_term=30,
+#     min_terms=3,
+# )
+# display(corr_tbl_12)
