@@ -2060,3 +2060,123 @@ def plot_risk_by_limit_multi(
 #     title="RBP: D4P12 risk vs limit",
 # )
 # plt.show()
+
+
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from statsmodels.stats.proportion import proportion_confint
+
+def plot_risk_by_limit_two_metrics_one_group(
+    df: pd.DataFrame,
+    test_name: str,
+    group_name: str,
+    metric_cols: list,                 # например ["D4P6_FLG", "D4P12_FLG"]
+    test_col: str = "TEST_NAME",
+    group_col: str = "TEST_GROUP_NAME",
+    limit_col: str = "MAX_LOAN_AMT_GR",
+    limit_order: list | None = None,   # например ["<=10K","<=25K","<=35K","<=45K","<=55K"]
+    alpha: float = 0.05,
+    min_n_per_point: int = 30,
+    ci: bool = True,
+    title: str | None = None,
+):
+    # 1) filter
+    d = df.loc[(df[test_col] == test_name) & (df[group_col] == group_name)].copy()
+    if d.empty:
+        raise ValueError("No rows after filtering by test/group.")
+
+    # 2) order for x
+    if limit_order is None:
+        limit_order = sorted(d[limit_col].dropna().unique().tolist())
+
+    d[limit_col] = pd.Categorical(d[limit_col], categories=limit_order, ordered=True)
+
+    # 3) aggregate for each metric separately
+    out = []
+    for m in metric_cols:
+        tmp = (
+            d.groupby(limit_col, dropna=False)[m]
+            .agg(n="count", k="sum")  # k=число плохих (если флаг 0/1)
+            .reset_index()
+        )
+        tmp["metric"] = m
+        out.append(tmp)
+
+    agg = pd.concat(out, ignore_index=True)
+
+    # 4) CI (Wilson)
+    if ci:
+        lo, hi = proportion_confint(
+            count=agg["k"].astype(int).values,
+            nobs=agg["n"].astype(int).values,
+            alpha=alpha,
+            method="wilson",
+        )
+        agg["ci_low"] = lo
+        agg["ci_high"] = hi
+
+    # 5) drop small n points
+    agg = agg[agg["n"] >= min_n_per_point].copy()
+
+    # 6) plot
+    x_labels = limit_order
+    x_pos_map = {lab: i for i, lab in enumerate(x_labels)}
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    for m in metric_cols:
+        sub = agg[agg["metric"] == m].copy()
+        if sub.empty:
+            continue
+
+        sub["x"] = sub[limit_col].astype(str).map(x_pos_map)
+        sub = sub.sort_values("x")
+
+        y = (sub["k"] / sub["n"]).astype(float).values
+        x = sub["x"].values
+
+        line, = ax.plot(x, y, marker="o", linewidth=2, label=m)
+        c = line.get_color()
+
+        # CI
+        if ci and ("ci_low" in sub.columns):
+            lo = sub["ci_low"].astype(float).values
+            hi = sub["ci_high"].astype(float).values
+            yerr = np.vstack([y - lo, hi - y])
+            ax.errorbar(x, y, yerr=yerr, fmt="none", capsize=3, ecolor=c, elinewidth=1.5)
+
+        # n labels
+        for xi, yi, ni in zip(x, y, sub["n"].astype(int).values):
+            ax.annotate(f"n={ni}", (xi, yi), textcoords="offset points", xytext=(0, -12),
+                        ha="center", fontsize=9, color=c)
+
+    ax.set_xticks(range(len(x_labels)))
+    ax.set_xticklabels(x_labels)
+    ax.set_ylabel("Risk rate")
+    ax.set_xlabel(limit_col)
+
+    if title is None:
+        title = f"{test_name} / {group_name}: risk vs limit ({', '.join(metric_cols)})"
+    ax.set_title(title)
+
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+    return agg, fig, ax
+    
+    
+    
+agg, fig, ax = plot_risk_by_limit_two_metrics_one_group(
+    df,
+    test_name="RBP_GOOD",
+    group_name="good_good",
+    metric_cols=["D4P6_FLG", "D4P12_FLG"],
+    limit_order=["<=10K","<=25K","<=35K","<=45K","<=55K"],
+    min_n_per_point=30,
+    ci=True,
+    alpha=0.05
+)
