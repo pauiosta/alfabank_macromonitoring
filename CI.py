@@ -1885,3 +1885,178 @@ def add_significance_for_two_groups(
 # kpis = compute_kpis_for_test_two_groups(df, test_name="RBP_GOOD", group_a="good_basic", group_b="good_good")
 # kpis_sig = add_significance_for_two_groups(df, kpis, "RBP_GOOD", "good_basic", "good_good", cols, conv_cols, alpha=0.05)
 # display(kpis_sig)
+
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.ticker import PercentFormatter
+
+# -----------------------------
+# Helper: order for MAX_LOAN_AMT_GR like "<=10K", "<=25K", ... (and keeps unknowns at the end)
+# -----------------------------
+def _parse_amt_bucket(x: str):
+    if pd.isna(x):
+        return np.inf
+    s = str(x).strip().upper().replace(" ", "")
+    # examples: "<=10K", "<=35K", "<=55K", "10-25K"
+    # take the biggest number in the string as bucket "upper bound" proxy
+    import re
+    nums = re.findall(r"(\d+)", s)
+    if not nums:
+        return np.inf
+    return float(nums[-1])
+
+def _ensure_order(values, explicit_order=None):
+    vals = [v for v in pd.unique(values) if pd.notna(v)]
+    if explicit_order is not None:
+        # keep only those present, keep original explicit order
+        return [v for v in explicit_order if v in set(vals)]
+    # otherwise sort by numeric parsing
+    return sorted(vals, key=_parse_amt_bucket)
+
+# -----------------------------
+# Main function
+# -----------------------------
+def plot_risk_by_limit_multi(
+    df: pd.DataFrame,
+    test_col: str = "TEST_NAME",
+    group_col: str = "TEST_GROUP_NAME",
+    amt_col: str = "MAX_LOAN_AMT_GR",
+    risk_col: str = "D4P6_FLG",     # <- choose any: "D4P6_FLG", "D4P9_FLG", "D4P12_FLG", etc.
+    tests=None,                     # list[str] or None => all
+    groups=None,                    # list[str] or None => all
+    amt_order=None,                 # explicit order list, optional
+    min_n_per_point: int = 30,      # hide points with too small n
+    ci: bool = True,                # draw 95% CI (Wilson) for binomial risk
+    alpha: float = 0.05,
+    normalize_y_as_percent: bool = True,
+    title: str | None = None,
+    figsize=(12, 6),
+):
+    """
+    Plots risk vs limit bucket with multiple lines for (test, group).
+    Risk is treated as binomial mean of risk_col (0/1 or boolean).
+    """
+
+    d = df.copy()
+
+    # filter tests/groups
+    if tests is not None:
+        d = d[d[test_col].isin(tests)]
+    if groups is not None:
+        d = d[d[group_col].isin(groups)]
+
+    # clean risk to numeric 0/1
+    d = d[pd.notna(d[risk_col]) & pd.notna(d[amt_col]) & pd.notna(d[test_col]) & pd.notna(d[group_col])]
+    d[risk_col] = d[risk_col].astype(float)
+
+    if d.empty:
+        raise ValueError("No data after filters. Check tests/groups/risk_col/amt_col.")
+
+    # category order for amount
+    order = _ensure_order(d[amt_col], explicit_order=amt_order)
+    d[amt_col] = pd.Categorical(d[amt_col], categories=order, ordered=True)
+
+    # aggregate
+    agg = (
+        d.groupby([test_col, group_col, amt_col], dropna=False)
+        .agg(n=(risk_col, "size"), risk=(risk_col, "mean"))
+        .reset_index()
+    )
+
+    # Wilson CI for proportions (more stable than normal approx)
+    def wilson_ci(p, n, z=1.96):
+        if n <= 0 or pd.isna(p):
+            return (np.nan, np.nan)
+        denom = 1 + z**2 / n
+        center = (p + z**2 / (2*n)) / denom
+        half = (z * np.sqrt((p*(1-p) + z**2/(4*n)) / n)) / denom
+        return center - half, center + half
+
+    if ci:
+        z = 1.96  # ~95%
+        lows, highs = [], []
+        for p, n in zip(agg["risk"].values, agg["n"].values):
+            lo, hi = wilson_ci(p, int(n), z=z)
+            lows.append(lo); highs.append(hi)
+        agg["ci_low"] = lows
+        agg["ci_high"] = highs
+
+    # mask small n
+    agg.loc[agg["n"] < min_n_per_point, ["risk", "ci_low", "ci_high"]] = np.nan
+
+    # plotting
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # x positions (categorical)
+    x_labels = order
+    x_pos = np.arange(len(x_labels))
+
+    # build lines for each (test, group)
+    line_keys = agg[[test_col, group_col]].drop_duplicates().sort_values([test_col, group_col]).values.tolist()
+
+    for t, g in line_keys:
+        sub = agg[(agg[test_col] == t) & (agg[group_col] == g)].sort_values(amt_col)
+        # align to full x axis
+        sub = sub.set_index(amt_col).reindex(x_labels)
+        y = sub["risk"].values.astype(float)
+        label = f"{t} / {g}"
+
+        ax.plot(x_pos, y, marker="o", linewidth=2, label=label)
+
+        if ci:
+            lo = sub["ci_low"].values.astype(float)
+            hi = sub["ci_high"].values.astype(float)
+            yerr_low = y - lo
+            yerr_high = hi - y
+            # avoid negative yerr when NaN
+            yerr = np.vstack([np.where(np.isfinite(yerr_low), yerr_low, np.nan),
+                              np.where(np.isfinite(yerr_high), yerr_high, np.nan)])
+            ax.errorbar(x_pos, y, yerr=yerr, fmt="none", capsize=3)
+
+        # annotate n under points
+        for i, nval in enumerate(sub["n"].values):
+            if pd.isna(y[i]) or pd.isna(nval):
+                continue
+            ax.annotate(f"n={int(nval)}", (x_pos[i], y[i]),
+                        textcoords="offset points", xytext=(0, -18),
+                        ha="center", fontsize=8)
+
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels([str(x) for x in x_labels], rotation=0)
+    ax.set_xlabel(amt_col)
+
+    ax.set_ylabel(f"Risk ({risk_col})")
+    if normalize_y_as_percent:
+        ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+
+    ax.grid(True, axis="y", alpha=0.3)
+
+    if title is None:
+        title = f"Risk vs {amt_col} (metric={risk_col})"
+    ax.set_title(title)
+
+    ax.legend(loc="best")
+    plt.tight_layout()
+
+    return agg, fig, ax
+
+
+# -----------------------------
+# Example usage
+# -----------------------------
+# agg, fig, ax = plot_risk_by_limit_multi(
+#     df,
+#     test_col="TEST_NAME",
+#     group_col="TEST_GROUP_NAME",
+#     amt_col="MAX_LOAN_AMT_GR",
+#     risk_col="D4P12_FLG",
+#     tests=["RBP_GOOD", "RBP_AVG"],
+#     groups=["good_basic", "good_good"],
+#     amt_order=["<=10K","<=25K","<=35K","<=45K","<=55K"],   # optional
+#     min_n_per_point=30,
+#     ci=True,
+#     title="RBP: D4P12 risk vs limit",
+# )
+# plt.show()
