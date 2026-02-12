@@ -391,3 +391,116 @@ def crosstab_pd_x_amount(
 # display(n_tbl)
 # display(mean_pd_tbl)
 # display(risk_tbl)   # this is your key: actual risk by PD x amount
+
+
+import numpy as np
+import pandas as pd
+
+
+def pd_bucket_profile(
+    df: pd.DataFrame,
+    *,
+    test_name: str,
+    group_name: str,
+    test_col: str = "TEST_NAME",
+    group_col: str = "TEST_GROUP_NAME",
+    pd_col: str = "PD",                      # PD score/probability column
+    numeric_cols: list[str] | None = None,   # which numeric metrics to average (term, amount, payment, etc.)
+    risk_cols: list[str] | None = None,      # risk indicators (e.g. ["D4P6_FLG","D4P9_FLG","D4P12_FLG"])
+    n_buckets: int = 10,
+    bucket_edges: list[float] | None = None, # optional explicit edges instead of qcut
+    bucket_labels: list[str] | None = None,  # optional labels
+    dropna_pd: bool = True,
+) -> pd.DataFrame:
+    """
+    Splits PD into buckets for a выбранного test/group and computes mean of given numeric columns,
+    plus means of risk columns (risk rate), and counts.
+
+    - If bucket_edges is provided -> uses pd.cut with these edges.
+    - Else -> uses pd.qcut into n_buckets quantiles.
+    """
+
+    d = df.loc[df[test_col].eq(test_name) & df[group_col].eq(group_name)].copy()
+
+    if dropna_pd:
+        d = d[d[pd_col].notna()].copy()
+
+    # Validate / auto-pick numeric columns
+    if numeric_cols is None:
+        # take all numeric cols except obvious IDs and risk cols
+        risk_cols_set = set(risk_cols or [])
+        exclude = {test_col, group_col}
+        cand = [
+            c for c in d.columns
+            if c not in exclude
+            and c != pd_col
+            and c not in risk_cols_set
+            and pd.api.types.is_numeric_dtype(d[c])
+        ]
+        numeric_cols = cand
+
+    if risk_cols is None:
+        risk_cols = []
+
+    # Build PD buckets
+    if bucket_edges is not None:
+        bins = np.array(bucket_edges, dtype=float)
+        if bucket_labels is None:
+            bucket_labels = [f"[{bins[i]:.4g}, {bins[i+1]:.4g})" for i in range(len(bins) - 1)]
+        d["PD_BUCKET"] = pd.cut(d[pd_col], bins=bins, labels=bucket_labels, include_lowest=True, right=False)
+    else:
+        # qcut can fail if too many duplicates; handle with rank
+        x = d[pd_col]
+        try:
+            d["PD_BUCKET"] = pd.qcut(x, q=n_buckets, duplicates="drop")
+        except ValueError:
+            # fallback: rank then qcut
+            r = x.rank(method="average")
+            d["PD_BUCKET"] = pd.qcut(r, q=n_buckets, duplicates="drop")
+
+    # Aggregations: mean numeric metrics + mean risk flags (risk rate) + counts
+    agg_dict = {c: "mean" for c in numeric_cols}
+    for rc in risk_cols:
+        agg_dict[rc] = "mean"  # assuming flags 0/1 -> mean = risk rate
+
+    out = (
+        d.groupby("PD_BUCKET", dropna=False)
+         .agg(
+            N=("PD_BUCKET", "size"),
+            PD_MEAN=(pd_col, "mean"),
+            PD_MIN=(pd_col, "min"),
+            PD_MAX=(pd_col, "max"),
+            **agg_dict
+         )
+         .reset_index()
+    )
+
+    # Add metadata columns
+    out.insert(0, "TEST_NAME", test_name)
+    out.insert(1, "TEST_GROUP_NAME", group_name)
+
+    # Nice formatting helpers (optional)
+    return out
+
+
+# ---------------- Example usage ----------------
+# You choose what to average:
+# term/amount/payment + any other numeric columns you want
+metrics_to_avg = ["REQUESTED_TERM", "DISB_AMT", "MONTHLY_PAYMENT"]  # <-- rename to your dataset columns
+
+# Risk flags you want to compare (means = rates)
+risk_flags = ["D4P6_FLG", "D4P9_FLG", "D4P12_FLG"]  # <-- rename to your dataset columns
+
+profile = pd_bucket_profile(
+    df,
+    test_name="RBP_GOOD",
+    group_name="good_good",
+    test_col="TEST_NAME",
+    group_col="TEST_GROUP_NAME",
+    pd_col="PD_SCORE",              # <-- your PD column
+    numeric_cols=metrics_to_avg,
+    risk_cols=risk_flags,
+    n_buckets=10
+)
+
+display(profile)
