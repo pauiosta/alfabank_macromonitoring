@@ -272,3 +272,122 @@ display(corr_tbl)
 #     min_terms=3,
 # )
 # display(corr_tbl_12)
+
+
+import numpy as np
+import pandas as pd
+
+# -----------------------------
+# 1) Utility: make nice PD buckets
+# -----------------------------
+def add_pd_buckets(
+    df: pd.DataFrame,
+    pd_col: str,
+    method: str = "quantile",   # "quantile" | "fixed"
+    n_bins: int = 10,           # for quantile
+    fixed_edges=None,           # for fixed, e.g. [0,0.02,0.04,0.06,0.08,0.10,1.0]
+    labels=None,
+    out_col: str = "PD_BUCKET",
+):
+    d = df.copy()
+    d[pd_col] = pd.to_numeric(d[pd_col], errors="coerce")
+
+    if method == "quantile":
+        # qcut may fail if many equal values -> duplicates="drop"
+        d[out_col] = pd.qcut(d[pd_col], q=n_bins, duplicates="drop")
+    elif method == "fixed":
+        if fixed_edges is None:
+            raise ValueError("For method='fixed' you must provide fixed_edges")
+        if labels is None:
+            # auto labels like "0-2%", "2-4%", ...
+            labels = []
+            for a, b in zip(fixed_edges[:-1], fixed_edges[1:]):
+                labels.append(f"{a:.2%}–{b:.2%}")
+        d[out_col] = pd.cut(d[pd_col], bins=fixed_edges, labels=labels, include_lowest=True, right=True)
+    else:
+        raise ValueError("method must be 'quantile' or 'fixed'")
+
+    return d
+
+
+# -----------------------------
+# 2) Crosstab PD x Amount with:
+#    - n
+#    - mean risk (optional)
+#    - mean PD (optional)
+# -----------------------------
+def crosstab_pd_x_amount(
+    df: pd.DataFrame,
+    pd_col: str,
+    amount_col: str,
+    risk_col: str | None = None,           # e.g. "D4P12_FLG"
+    pd_bucket_col: str = "PD_BUCKET",
+    amount_order: list | None = None,      # optional explicit order for amount buckets
+    min_n: int = 0,                        # optionally blank out low-N cells
+):
+    d = df.copy()
+
+    # keep needed cols
+    keep = [pd_col, amount_col, pd_bucket_col]
+    if risk_col:
+        keep.append(risk_col)
+    d = d[keep].copy()
+
+    # clean
+    d[pd_col] = pd.to_numeric(d[pd_col], errors="coerce")
+    if risk_col:
+        d[risk_col] = pd.to_numeric(d[risk_col], errors="coerce")
+    d = d.dropna(subset=[pd_bucket_col, amount_col])
+
+    # amount order if provided
+    if amount_order is not None:
+        d[amount_col] = pd.Categorical(d[amount_col], categories=amount_order, ordered=True)
+
+    # N table
+    n_tbl = pd.crosstab(d[pd_bucket_col], d[amount_col], dropna=False)
+
+    # mean PD per cell
+    mean_pd = (
+        d.pivot_table(index=pd_bucket_col, columns=amount_col, values=pd_col, aggfunc="mean", dropna=False)
+    )
+
+    # risk per cell (if provided)
+    if risk_col:
+        risk_tbl = (
+            d.pivot_table(index=pd_bucket_col, columns=amount_col, values=risk_col, aggfunc="mean", dropna=False)
+        )
+    else:
+        risk_tbl = None
+
+    # blank out low-N cells if requested
+    if min_n and min_n > 0:
+        mask_low = n_tbl < min_n
+        mean_pd = mean_pd.mask(mask_low)
+        if risk_tbl is not None:
+            risk_tbl = risk_tbl.mask(mask_low)
+
+    return n_tbl, mean_pd, risk_tbl
+
+
+# -----------------------------
+# 3) Example usage
+# -----------------------------
+# df = ... your dataframe
+#
+# 3.1) Add PD buckets (quantiles / deciles)
+# df_b = add_pd_buckets(df, pd_col="PD_SCORE", method="quantile", n_bins=10, out_col="PD_BUCKET")
+#
+# 3.2) Crosstab PD bucket x amount bucket
+# n_tbl, mean_pd_tbl, risk_tbl = crosstab_pd_x_amount(
+#     df_b,
+#     pd_col="PD_SCORE",
+#     amount_col="MAX_LOAN_AMT_GR",
+#     risk_col="D4P12_FLG",                 # or None if you only want counts/PD
+#     pd_bucket_col="PD_BUCKET",
+#     amount_order=["<=10K","<=25K","<=35K","<=45K","<=55K"],  # optional
+#     min_n=30
+# )
+#
+# display(n_tbl)
+# display(mean_pd_tbl)
+# display(risk_tbl)   # this is your key: actual risk by PD x amount
