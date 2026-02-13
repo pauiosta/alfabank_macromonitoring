@@ -760,3 +760,21 @@ def plot_npv_heatmap_with_n(
 
     plt.tight_layout()
     return pivot_v, pivot_n, fig, ax
+
+
+pivot_v, pivot_n, fig, ax = plot_npv_heatmap_with_n(
+    df,
+    test_name="RBP_GOOD",
+    test_group_name="good_good",
+    x_col="REQUESTED_TERM",
+    y_col="REGULAR_PAYMENT_AMT_GR",
+    npv_col="NPV",
+    mode="per_offer",  # попробуй также "total" / "per_util" / "per_fin_amount"
+    x_order=[6, 9, 12, 15, 18],
+    y_order=[">4000", "<=4000", "<=3000", "<=2000", "<=1000"],
+    min_n_per_cell=20,
+    scale_mode="clip_quantile",
+    clip_q=0.95,
+    cmap="RdYlGn",  # зелёный = высокий NPV
+)
+plt.show()
