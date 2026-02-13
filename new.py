@@ -532,3 +532,231 @@ plt.title(f"Distribution (log-x): {col} (x>0)")
 plt.xlabel(col)
 plt.ylabel("count")
 plt.show()
+
+
+
+
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+def plot_npv_heatmap_with_n(
+    df: pd.DataFrame,
+    *,
+    test_name: str,
+    test_group_name: str,
+    x_col: str,                 # например "REQUESTED_TERM"
+    y_col: str,                 # например "REGULAR_PAYMENT_AMT_GR"
+    npv_col: str = "NPV",       # твой столбец NPV
+    mode: str = "per_offer",    # "total" | "per_offer" | "per_util" | "per_fin_amount"
+    offer_id_col: str = "OFFER_RK",
+    util_dt_col: str = "UTILIZATION_DTTM",
+    fin_amt_col: str = "DISB_AMT",
+    test_col: str = "TEST_NAME",
+    group_col: str = "TEST_GROUP_NAME",
+    x_order=None,
+    y_order=None,
+    min_n_per_cell: int = 1,
+    scale_mode: str = "clip_quantile",   # "none" | "clip_quantile"
+    clip_q: float = 0.95,
+    cmap: str = "RdYlGn",        # NPV: больше = лучше -> зелёный
+    title: str | None = None,
+    fmt_value: str = "{:.0f}",   # формат NPV в ячейке
+):
+    d = df.loc[df[test_col].eq(test_name) & df[group_col].eq(test_group_name)].copy()
+    d = d[d[x_col].notna() & d[y_col].notna()].copy()
+
+    # n в ячейке: сколько офферов (если есть offer_id_col), иначе строк
+    if offer_id_col in d.columns:
+        n_series = d.groupby([y_col, x_col])[offer_id_col].nunique()
+    else:
+        n_series = d.groupby([y_col, x_col]).size()
+
+    # числитель: сумма NPV
+    num = d.groupby([y_col, x_col])[npv_col].sum()
+
+    # знаменатель
+    if mode == "total":
+        val = num
+        value_label = "NPV total"
+    elif mode == "per_offer":
+        denom = d.groupby([y_col, x_col])[offer_id_col].nunique()
+        val = num / denom.replace(0, np.nan)
+        value_label = "NPV per offer"
+    elif mode == "per_util":
+        util_flag = d[util_dt_col].notna().astype(int)
+        denom = util_flag.groupby([d[y_col], d[x_col]]).sum()
+        val = num / denom.replace(0, np.nan)
+        value_label = "NPV per util"
+    elif mode == "per_fin_amount":
+        denom = d.groupby([y_col, x_col])[fin_amt_col].sum()
+        val = num / denom.replace(0, np.nan)
+        value_label = "NPV / financial amount"
+    else:
+        raise ValueError("mode must be one of: total, per_offer, per_util, per_fin_amount")
+
+    pivot_v = val.unstack(x_col)
+    pivot_n = n_series.unstack(x_col)
+
+    # порядок осей
+    if x_order is not None:
+        pivot_v = pivot_v.reindex(columns=list(x_order))
+        pivot_n = pivot_n.reindex(columns=list(x_order))
+    if y_order is not None:
+        pivot_v = pivot_v.reindex(index=list(y_order))
+        pivot_n = pivot_n.reindex(index=list(y_order))
+
+    # фильтр по min_n_per_cell
+    pivot_v = pivot_v.where(pivot_n >= min_n_per_cell)
+
+    # клип шкалы, чтобы выбросы не "ломали" палитру
+    v_for_scale = pivot_v.to_numpy().astype(float)
+    v_for_scale = v_for_scale[~np.isnan(v_for_scale)]
+    vmin, vmax = (None, None)
+    if scale_mode == "clip_quantile" and v_for_scale.size > 0:
+        vmax = np.quantile(v_for_scale, clip_q)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    im = ax.imshow(pivot_v.values, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+
+    ax.set_xticks(np.arange(pivot_v.shape[1]))
+    ax.set_yticks(np.arange(pivot_v.shape[0]))
+    ax.set_xticklabels(pivot_v.columns)
+    ax.set_yticklabels(pivot_v.index)
+
+    ax.set_xlabel(x_col)
+    ax.set_ylabel(y_col)
+
+    if title is None:
+        title = f"{test_name} / {test_group_name} — {value_label}\nY={y_col}, X={x_col}"
+    ax.set_title(title)
+
+    # подписи: value + (n=)
+    for i in range(pivot_v.shape[0]):
+        for j in range(pivot_v.shape[1]):
+            v = pivot_v.iat[i, j]
+            n = pivot_n.iat[i, j]
+            if pd.notna(v) and pd.notna(n):
+                ax.text(j, i, f"{fmt_value.format(v)}\n(n={int(n)})",
+                        ha="center", va="center", fontsize=9)
+
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label(value_label)
+
+    plt.tight_layout()
+    return pivot_v, pivot_n, fig, ax
+    
+    
+    
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+def plot_npv_heatmap_with_n(
+    df: pd.DataFrame,
+    *,
+    test_name: str,
+    test_group_name: str,
+    x_col: str,                 # например "REQUESTED_TERM"
+    y_col: str,                 # например "REGULAR_PAYMENT_AMT_GR"
+    npv_col: str = "NPV",       # твой столбец NPV
+    mode: str = "per_offer",    # "total" | "per_offer" | "per_util" | "per_fin_amount"
+    offer_id_col: str = "OFFER_RK",
+    util_dt_col: str = "UTILIZATION_DTTM",
+    fin_amt_col: str = "DISB_AMT",
+    test_col: str = "TEST_NAME",
+    group_col: str = "TEST_GROUP_NAME",
+    x_order=None,
+    y_order=None,
+    min_n_per_cell: int = 1,
+    scale_mode: str = "clip_quantile",   # "none" | "clip_quantile"
+    clip_q: float = 0.95,
+    cmap: str = "RdYlGn",        # NPV: больше = лучше -> зелёный
+    title: str | None = None,
+    fmt_value: str = "{:.0f}",   # формат NPV в ячейке
+):
+    d = df.loc[df[test_col].eq(test_name) & df[group_col].eq(test_group_name)].copy()
+    d = d[d[x_col].notna() & d[y_col].notna()].copy()
+
+    # n в ячейке: сколько офферов (если есть offer_id_col), иначе строк
+    if offer_id_col in d.columns:
+        n_series = d.groupby([y_col, x_col])[offer_id_col].nunique()
+    else:
+        n_series = d.groupby([y_col, x_col]).size()
+
+    # числитель: сумма NPV
+    num = d.groupby([y_col, x_col])[npv_col].sum()
+
+    # знаменатель
+    if mode == "total":
+        val = num
+        value_label = "NPV total"
+    elif mode == "per_offer":
+        denom = d.groupby([y_col, x_col])[offer_id_col].nunique()
+        val = num / denom.replace(0, np.nan)
+        value_label = "NPV per offer"
+    elif mode == "per_util":
+        util_flag = d[util_dt_col].notna().astype(int)
+        denom = util_flag.groupby([d[y_col], d[x_col]]).sum()
+        val = num / denom.replace(0, np.nan)
+        value_label = "NPV per util"
+    elif mode == "per_fin_amount":
+        denom = d.groupby([y_col, x_col])[fin_amt_col].sum()
+        val = num / denom.replace(0, np.nan)
+        value_label = "NPV / financial amount"
+    else:
+        raise ValueError("mode must be one of: total, per_offer, per_util, per_fin_amount")
+
+    pivot_v = val.unstack(x_col)
+    pivot_n = n_series.unstack(x_col)
+
+    # порядок осей
+    if x_order is not None:
+        pivot_v = pivot_v.reindex(columns=list(x_order))
+        pivot_n = pivot_n.reindex(columns=list(x_order))
+    if y_order is not None:
+        pivot_v = pivot_v.reindex(index=list(y_order))
+        pivot_n = pivot_n.reindex(index=list(y_order))
+
+    # фильтр по min_n_per_cell
+    pivot_v = pivot_v.where(pivot_n >= min_n_per_cell)
+
+    # клип шкалы, чтобы выбросы не "ломали" палитру
+    v_for_scale = pivot_v.to_numpy().astype(float)
+    v_for_scale = v_for_scale[~np.isnan(v_for_scale)]
+    vmin, vmax = (None, None)
+    if scale_mode == "clip_quantile" and v_for_scale.size > 0:
+        vmax = np.quantile(v_for_scale, clip_q)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    im = ax.imshow(pivot_v.values, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+
+    ax.set_xticks(np.arange(pivot_v.shape[1]))
+    ax.set_yticks(np.arange(pivot_v.shape[0]))
+    ax.set_xticklabels(pivot_v.columns)
+    ax.set_yticklabels(pivot_v.index)
+
+    ax.set_xlabel(x_col)
+    ax.set_ylabel(y_col)
+
+    if title is None:
+        title = f"{test_name} / {test_group_name} — {value_label}\nY={y_col}, X={x_col}"
+    ax.set_title(title)
+
+    # подписи: value + (n=)
+    for i in range(pivot_v.shape[0]):
+        for j in range(pivot_v.shape[1]):
+            v = pivot_v.iat[i, j]
+            n = pivot_n.iat[i, j]
+            if pd.notna(v) and pd.notna(n):
+                ax.text(j, i, f"{fmt_value.format(v)}\n(n={int(n)})",
+                        ha="center", va="center", fontsize=9)
+
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label(value_label)
+
+    plt.tight_layout()
+    return pivot_v, pivot_n, fig, ax
