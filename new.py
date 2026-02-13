@@ -870,3 +870,74 @@ profile = pd_bucket_profile(
 )
 
 display(profile)
+
+
+import numpy as np
+import pandas as pd
+
+def compare_d4p6_segments(
+    df: pd.DataFrame,
+    *,
+    d4p6_col: str = "D4P6_FLG",
+    metrics_to_avg = ("REQUESTED_TERM", "DISB_AMT", "MONTHLY_PAYMENT"),
+    test_col: str | None = None,
+    group_col: str | None = None,
+    test_name: str | None = None,
+    group_name: str | None = None,
+):
+    d = df.copy()
+
+    # optional filter by test/group
+    if test_col and test_name is not None:
+        d = d[d[test_col].eq(test_name)]
+    if group_col and group_name is not None:
+        d = d[d[group_col].eq(group_name)]
+
+    # keep only 0/1 rows
+    d = d[d[d4p6_col].isin([0, 1])].copy()
+
+    # build summary
+    out = []
+    for flag, g in d.groupby(d4p6_col, dropna=False):
+        row = {
+            d4p6_col: int(flag),
+            "N_ROWS": int(len(g)),
+        }
+        for m in metrics_to_avg:
+            s = pd.to_numeric(g[m], errors="coerce")
+            row[f"{m}_MEAN"] = float(s.mean(skipna=True))
+            row[f"{m}_MEDIAN"] = float(s.median(skipna=True))
+            row[f"{m}_STD"] = float(s.std(skipna=True))
+            row[f"{m}_N"] = int(s.notna().sum())
+        out.append(row)
+
+    res = pd.DataFrame(out).sort_values(d4p6_col).reset_index(drop=True)
+
+    # add "diff" row: (1 - 0) for MEANs/ MEDIANs
+    if set(res[d4p6_col]) == {0, 1}:
+        r0 = res[res[d4p6_col] == 0].iloc[0]
+        r1 = res[res[d4p6_col] == 1].iloc[0]
+        diff = {d4p6_col: "DIFF (1-0)", "N_ROWS": int(r1["N_ROWS"] - r0["N_ROWS"])}
+        for m in metrics_to_avg:
+            diff[f"{m}_MEAN"]   = float(r1[f"{m}_MEAN"] - r0[f"{m}_MEAN"])
+            diff[f"{m}_MEDIAN"] = float(r1[f"{m}_MEDIAN"] - r0[f"{m}_MEDIAN"])
+            diff[f"{m}_STD"]    = np.nan
+            diff[f"{m}_N"]      = int(r1[f"{m}_N"] - r0[f"{m}_N"])
+        res = pd.concat([res, pd.DataFrame([diff])], ignore_index=True)
+
+    return res
+
+
+# ===== Example usage =====
+metrics_to_avg = ["REQUESTED_TERM", "DISB_AMT", "MONTHLY_PAYMENT"]
+
+tbl = compare_d4p6_segments(
+    df,
+    d4p6_col="D4P6_FLG",
+    metrics_to_avg=metrics_to_avg,
+    # если нужно ограничить одним тестом/группой — раскомментируй:
+    # test_col="TEST_NAME", test_name="RBP_GOOD",
+    # group_col="TEST_GROUP_NAME", group_name="good_good",
+)
+
+display(tbl)
