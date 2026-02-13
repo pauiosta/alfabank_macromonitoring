@@ -778,3 +778,95 @@ pivot_v, pivot_n, fig, ax = plot_npv_heatmap_with_n(
     cmap="RdYlGn",  # зелёный = высокий NPV
 )
 plt.show()
+
+
+import numpy as np
+import pandas as pd
+
+
+def pd_bucket_profile(
+    df: pd.DataFrame,
+    *,
+    test_name: str,
+    group_name: str,
+    test_col: str = "TEST_NAME",
+    group_col: str = "TEST_GROUP_NAME",
+    pd_col: str = "PD",
+    numeric_cols: list[str] | None = None,   # числовые метрики для среднего (term, amount, payment, etc.)
+    risk_cols: list[str] | None = None,      # флаги риска 0/1, mean = risk rate
+    n_buckets: int = 10,
+    bucket_edges: list[float] | None = None, # если хочешь фиксированные границы
+    dropna_pd: bool = True,
+) -> pd.DataFrame:
+
+    d = df.loc[df[test_col].eq(test_name) & df[group_col].eq(group_name)].copy()
+    if dropna_pd:
+        d = d[d[pd_col].notna()].copy()
+
+    if risk_cols is None:
+        risk_cols = []
+
+    # если numeric_cols не задан — возьмём все числовые (кроме pd/test/group/risk)
+    if numeric_cols is None:
+        exclude = {test_col, group_col, pd_col, *risk_cols}
+        numeric_cols = [
+            c for c in d.columns
+            if c not in exclude and pd.api.types.is_numeric_dtype(d[c])
+        ]
+
+    # ---------- buckets ----------
+    if bucket_edges is not None:
+        bins = np.array(bucket_edges, dtype=float)
+        d["PD_BUCKET"] = pd.cut(d[pd_col], bins=bins, include_lowest=True, right=False)
+    else:
+        try:
+            d["PD_BUCKET"] = pd.qcut(d[pd_col], q=n_buckets, duplicates="drop")
+        except ValueError:
+            # fallback если много одинаковых значений
+            r = d[pd_col].rank(method="average")
+            d["PD_BUCKET"] = pd.qcut(r, q=n_buckets, duplicates="drop")
+
+    # ---------- aggregations (ВАЖНО: named aggregation) ----------
+    agg_kwargs = {
+        "N": ("PD_BUCKET", "size"),
+        "PD_MEAN": (pd_col, "mean"),
+        "PD_MIN": (pd_col, "min"),
+        "PD_MAX": (pd_col, "max"),
+    }
+
+    # средние по выбранным метрикам
+    for c in numeric_cols:
+        agg_kwargs[f"AVG_{c}"] = (c, "mean")
+
+    # risk flags: mean = rate
+    for rc in risk_cols:
+        agg_kwargs[f"RISK_{rc}"] = (rc, "mean")
+
+    out = (
+        d.groupby("PD_BUCKET", dropna=False)
+         .agg(**agg_kwargs)
+         .reset_index()
+    )
+
+    out.insert(0, "TEST_NAME", test_name)
+    out.insert(1, "TEST_GROUP_NAME", group_name)
+    return out
+
+
+# ----------- Example usage -----------
+metrics_to_avg = ["REQUESTED_TERM", "DISB_AMT", "MONTHLY_PAYMENT"]  # переименуешь под себя
+risk_flags = ["D4P6_FLG", "D4P9_FLG", "D4P12_FLG"]                 # переименуешь под себя
+
+profile = pd_bucket_profile(
+    df,
+    test_name="RBP_GOOD",
+    group_name="good_good",
+    test_col="TEST_NAME",
+    group_col="TEST_GROUP_NAME",
+    pd_col="PD_PM_01_XSELL_CL_CL_V2",
+    numeric_cols=metrics_to_avg,
+    risk_cols=risk_flags,
+    n_buckets=10
+)
+
+display(profile)
