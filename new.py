@@ -504,3 +504,31 @@ profile = pd_bucket_profile(
 )
 
 display(profile)
+
+import matplotlib.pyplot as plt
+
+col = "regular_payment_amt"
+
+# 1) Базовая статистика
+display(df[col].describe(percentiles=[.01,.05,.1,.25,.5,.75,.9,.95,.99]))
+print("NaN:", df[col].isna().sum(), " / total:", len(df))
+print("<=0:", (df[col] <= 0).sum())
+
+# 2) Гистограмма (сырое распределение)
+x = df[col].dropna()
+plt.figure()
+plt.hist(x, bins=50)
+plt.title(f"Distribution: {col}")
+plt.xlabel(col)
+plt.ylabel("count")
+plt.show()
+
+# 3) Если очень перекошено/длинный хвост — гистограмма в лог-шкале по X
+x_pos = x[x > 0]
+plt.figure()
+plt.hist(x_pos, bins=50)
+plt.xscale("log")
+plt.title(f"Distribution (log-x): {col} (x>0)")
+plt.xlabel(col)
+plt.ylabel("count")
+plt.show()
