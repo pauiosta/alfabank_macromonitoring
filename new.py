@@ -941,3 +941,168 @@ tbl = compare_d4p6_segments(
 )
 
 display(tbl)
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from statsmodels.stats.proportion import proportion_confint
+
+def plot_d4p6_vs_limit_two_groups_with_pd(
+    df: pd.DataFrame,
+    test_name: str,
+    group_a: str,
+    group_b: str,
+    test_col: str = "TEST_NAME",
+    group_col: str = "TEST_GROUP_NAME",
+    limit_col: str = "MAX_LOAN_AMT_GR",
+    risk_col: str = "D4P6_FLG",
+    pd_col: str = "PD Calibrated",     # <-- your PD column
+    limit_order=None,                 # e.g. ["<=10K","<=25K","<=35K","<=45K","<=55K"]
+    ci_level: float = 0.95,
+    ci_method: str = "wilson",
+    min_n_per_point: int = 30,
+    show_n: bool = True,
+    title: str | None = None,
+    figsize=(12, 5),
+):
+    """
+    One test, compare two groups.
+    Solid lines: D4P6 risk rate (mean of 0/1 flag) with binomial CI
+    Dashed lines: mean PD (PD Calibrated) for the same buckets.
+    """
+    d = df.copy()
+
+    # Filter to chosen test and groups
+    d = d[d[test_col].eq(test_name) & d[group_col].isin([group_a, group_b])].copy()
+
+    # Keep only non-null X and risk; PD can be null (we'll handle)
+    d = d[d[limit_col].notna() & d[risk_col].notna()].copy()
+
+    # Optional: enforce categorical order for X
+    if limit_order is None:
+        limit_order = list(pd.unique(d[limit_col]))
+    d[limit_col] = pd.Categorical(d[limit_col], categories=limit_order, ordered=True)
+
+    # Aggregate per (group, limit): n, k, risk_rate, pd_mean
+    agg = (
+        d.groupby([group_col, limit_col], dropna=False)
+         .agg(
+             n=(risk_col, "size"),
+             k=(risk_col, "sum"),              # assumes 0/1
+             pd_mean=(pd_col, "mean")           # dashed line
+         )
+         .reset_index()
+    )
+    agg["risk_rate"] = agg["k"] / agg["n"]
+
+    # CI for risk rate
+    alpha = 1.0 - ci_level
+    lo, hi = proportion_confint(
+        count=agg["k"].to_numpy(),
+        nobs=agg["n"].to_numpy(),
+        alpha=alpha,
+        method=ci_method
+    )
+    agg["ci_lo"] = lo
+    agg["ci_hi"] = hi
+    agg["valid"] = agg["n"] >= min_n_per_point
+
+    # Plot
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Secondary axis for PD (optional but usually nicer, since PD scale can differ)
+    ax2 = ax.twinx()
+
+    for g in [group_a, group_b]:
+        sub = agg[agg[group_col].eq(g)].sort_values(limit_col)
+
+        x_labels = sub[limit_col].astype(str).tolist()
+        x = np.arange(len(x_labels))
+
+        # Risk line (solid) + CI
+        y = sub["risk_rate"].to_numpy()
+        yerr = np.vstack([y - sub["ci_lo"].to_numpy(), sub["ci_hi"].to_numpy() - y])
+
+        mask = sub["valid"].to_numpy()
+        y_plot = y.copy()
+        y_plot[~mask] = np.nan
+        yerr_plot = yerr.copy()
+        yerr_plot[:, ~mask] = np.nan
+
+        ax.errorbar(
+            x, y_plot,
+            yerr=yerr_plot,
+            fmt="-o",
+            capsize=4,
+            linewidth=2,
+            label=f"{g} — D4P6"
+        )
+
+        if show_n:
+            for xi, yi, ni in zip(x, y, sub["n"].to_numpy()):
+                if np.isfinite(yi):
+                    ax.annotate(
+                        f"n={int(ni)}",
+                        (xi, yi),
+                        textcoords="offset points",
+                        xytext=(0, -14),
+                        ha="center",
+                        fontsize=9
+                    )
+
+        # PD dashed line (mean PD)
+        pd_y = sub["pd_mean"].to_numpy()
+        # also hide PD where bucket is too small (optional, usually consistent)
+        pd_y_plot = pd_y.copy()
+        pd_y_plot[~mask] = np.nan
+
+        ax2.plot(
+            x, pd_y_plot,
+            linestyle="--",
+            marker="o",
+            linewidth=2,
+            label=f"{g} — PD"
+        )
+
+    # X axis
+    ax.set_xticks(np.arange(len(limit_order)))
+    ax.set_xticklabels(limit_order, rotation=0)
+
+    # Labels
+    ax.set_xlabel(limit_col)
+    ax.set_ylabel("D4P6 risk rate")
+    ax2.set_ylabel(pd_col)
+
+    if title is None:
+        title = f"{test_name}: D4P6 vs {limit_col} | {group_a} vs {group_b} (+ PD dashed)"
+    ax.set_title(title)
+
+    ax.grid(True, axis="y", alpha=0.3)
+
+    # Merge legends from both axes
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, loc="best")
+
+    plt.tight_layout()
+    return agg, fig, (ax, ax2)
+
+
+# ---------------- Example usage ----------------
+# agg, fig, (ax, ax2) = plot_d4p6_vs_limit_two_groups_with_pd(
+#     df,
+#     test_name="RBP_GOOD",
+#     group_a="good_basic",
+#     group_b="good_good",
+#     test_col="TEST_NAME",
+#     group_col="TEST_GROUP_NAME",
+#     limit_col="MAX_LOAN_AMT_GR",
+#     risk_col="D4P6_FLG",
+#     pd_col="PD Calibrated",
+#     limit_order=["<=10K","<=25K","<=35K","<=45K","<=55K"],
+#     ci_level=0.95,
+#     ci_method="wilson",
+#     min_n_per_point=30,
+#     show_n=True
+# )
+# plt.show()
