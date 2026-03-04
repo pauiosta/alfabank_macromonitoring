@@ -47,3 +47,29 @@ finstar_hit_app_not_found (application was not found) will no longer trigger a r
 	∙	CLN → CLN: FPD7+ of 4.1% and Avg NPV of 1,934 are comparable to the baseline (5.2% / 1,966). The segment does not differ significantly from non-Finstar clients.
 	∙	POS → CLN: FPD7+ of 6.8% and Avg NPV of 1,021 are moderately above baseline but acceptable. At MRB=1, the predicted D4P6 is 16.15% with a positive NPV of 334, supporting disbursement. In contrast, finstar_hit_app_found at MRB=1 yields a predicted NPV of -882, confirming that only the app_not_found subsegment should be opened.
 	∙	Xsell → CLN: FPD7+ of 3.9% and Avg NPV of 1,335 are closely in line with the baseline (3.7% / 1,818). At MRB=1, the predicted D4P6 is 14.05% with a positive NPV of 473, confirming that finstar_hit_app_not_found MRB=1 can be opened for lending.​​​​​​​​​​​​​​​​
+
+
+
+Понял, спасибо за уточнение. Переписываю:
+
+Current Behavior
+The Pwinstar rule group currently contains four rules that apply exclusively to clients in the MRB1 bucket. Any applicant in MRB1 who triggers any of these rules receives a reject decision. Clients in MRB0 are not affected by these rules.
+The four rules are:
+	1.	finstar_hit_app_found — Finstar Hit: application was found. The applicant is present in the Finstar database and a matching application record was found.
+	2.	finstar_hit_app_not_found — Finstar Hit: application was not found. The applicant is present in the Finstar database, but no matching application record was found.
+	3.	finstar_hit_app_found_last_reject — Finstar Hit: application found, no agreement, last reject was within the past 1 year.
+	4.	finstar_hit_app_found_dpd10 — Finstar Hit: application found, had DPD10+ within the last 3 months.
+All four rules result in a reject for MRB1 clients across all product segments (CLN→CLN, POS→CLN, Xsell→CLN).
+
+Expected Behavior
+Following this change, the four Pwinstar rules within the MRB1 bucket will be treated differently based on the demonstrated risk profile of each subsegment.
+finstar_hit_app_found_last_reject (last reject ≤ 1 year ago) and finstar_hit_app_found_dpd10 (DPD10+ in the last 3 months) will continue to result in a reject for MRB1 clients. Across all segments these populations show FPD7+ rates of 8–18% and strongly negative average NPVs, indicating a concentration of risk that is not captured by the PD model alone and cannot be profitably served at this time.
+finstar_hit_app_found (application found) remains unchanged and continues to result in a reject for MRB1 clients.
+finstar_hit_app_not_found (application was not found) will no longer trigger a reject in MRB1. Clients matching this rule will now be approved at MRB1. The rationale per segment:
+	∙	CLN → CLN: FPD7+ of 4.1% and Avg NPV of 1,934 are comparable to the baseline (5.2% / 1,966), confirming the segment does not differ significantly from non-Finstar clients.
+	∙	POS → CLN: At MRB=1, predicted D4P6 is 16.15% with a positive NPV of 334, supporting disbursement. In contrast, finstar_hit_app_found at MRB=1 yields a predicted NPV of -882, confirming only the app_not_found subsegment should be opened.
+	∙	Xsell → CLN: At MRB=1, predicted D4P6 is 14.05% with a positive NPV of 473, confirming that finstar_hit_app_not_found MRB=1 can be opened for lending.
+MRB0 clients remain unaffected by this change.
+
+Business Value
+(секцию Business Value менять не нужно — она остаётся актуальной, только уточни что речь идёт именно о MRB1 сегменте) — хочешь, перепишу и её с этим уточнением?​​​​​​​​​​​​​​​​
